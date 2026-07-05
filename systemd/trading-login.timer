@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Zerodha login at 8:45 AM IST (3:15 UTC)
+Requires=trading-login.service
+
+[Timer]
+OnCalendar=*-*-* 03:15:00 UTC
+Persistent=true
+Unit=trading-login.service
+
+[Install]
+WantedBy=timers.target

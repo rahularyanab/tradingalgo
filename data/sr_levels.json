@@ -1,0 +1,162 @@
+[
+  {
+    "level": 24089.0,
+    "sr_type": "resistance",
+    "touches": 3,
+    "dates": ["2026-06-12", "2026-06-16", "2026-06-17"],
+    "first_seen": "2026-06-12",
+    "last_seen": "2026-06-17",
+    "broken": false,
+    "broken_date": null
+  },
+  {
+    "level": 24180.0,
+    "sr_type": "resistance",
+    "touches": 3,
+    "dates": ["2026-06-10", "2026-06-13", "2026-06-16"],
+    "first_seen": "2026-06-10",
+    "last_seen": "2026-06-16",
+    "broken": false,
+    "broken_date": null
+  },
+  {
+    "level": 24255.0,
+    "sr_type": "resistance",
+    "touches": 2,
+    "dates": ["2026-07-03", "2026-07-03"],
+    "first_seen": "2026-07-03",
+    "last_seen": "2026-07-03",
+    "broken": false,
+    "broken_date": null
+  },
+  {
+    "level": 24290.0,
+    "sr_type": "resistance",
+    "touches": 3,
+    "dates": ["2026-06-05", "2026-06-10", "2026-06-13"],
+    "first_seen": "2026-06-05",
+    "last_seen": "2026-06-13",
+    "broken": false,
+    "broken_date": null
+  },
+  {
+    "level": 24357.0,
+    "sr_type": "resistance",
+    "touches": 2,
+    "dates": ["2026-07-03", "2026-07-03"],
+    "first_seen": "2026-07-03",
+    "last_seen": "2026-07-03",
+    "broken": false,
+    "broken_date": null
+  },
+  {
+    "level": 24460.0,
+    "sr_type": "resistance",
+    "touches": 3,
+    "dates": ["2026-05-28", "2026-06-04", "2026-06-10"],
+    "first_seen": "2026-05-28",
+    "last_seen": "2026-06-10",
+    "broken": false,
+    "broken_date": null
+  },
+  {
+    "level": 24608.0,
+    "sr_type": "resistance",
+    "touches": 2,
+    "dates": ["2026-07-03", "2026-07-03"],
+    "first_seen": "2026-07-03",
+    "last_seen": "2026-07-03",
+    "broken": false,
+    "broken_date": null
+  },
+  {
+    "level": 24650.0,
+    "sr_type": "resistance",
+    "touches": 3,
+    "dates": ["2026-05-20", "2026-05-27", "2026-06-04"],
+    "first_seen": "2026-05-20",
+    "last_seen": "2026-06-04",
+    "broken": false,
+    "broken_date": null
+  },
+  {
+    "level": 24750.0,
+    "sr_type": "resistance",
+    "touches": 3,
+    "dates": ["2026-05-15", "2026-05-22", "2026-05-29"],
+    "first_seen": "2026-05-15",
+    "last_seen": "2026-05-29",
+    "broken": false,
+    "broken_date": null
+  },
+  {
+    "level": 23930.0,
+    "sr_type": "support",
+    "touches": 3,
+    "dates": ["2026-06-12", "2026-06-16", "2026-06-17"],
+    "first_seen": "2026-06-12",
+    "last_seen": "2026-06-17",
+    "broken": false,
+    "broken_date": null
+  },
+  {
+    "level": 23800.0,
+    "sr_type": "support",
+    "touches": 3,
+    "dates": ["2026-06-05", "2026-06-10", "2026-06-16"],
+    "first_seen": "2026-06-05",
+    "last_seen": "2026-06-16",
+    "broken": false,
+    "broken_date": null
+  },
+  {
+    "level": 23700.0,
+    "sr_type": "support",
+    "touches": 3,
+    "dates": ["2026-05-28", "2026-06-04", "2026-06-10"],
+    "first_seen": "2026-05-28",
+    "last_seen": "2026-06-10",
+    "broken": false,
+    "broken_date": null
+  },
+  {
+    "level": 23570.0,
+    "sr_type": "support",
+    "touches": 3,
+    "dates": ["2026-05-20", "2026-05-27", "2026-06-04"],
+    "first_seen": "2026-05-20",
+    "last_seen": "2026-06-04",
+    "broken": false,
+    "broken_date": null
+  },
+  {
+    "level": 23419.0,
+    "sr_type": "support",
+    "touches": 3,
+    "dates": ["2026-05-12", "2026-05-20", "2026-05-27"],
+    "first_seen": "2026-05-12",
+    "last_seen": "2026-05-27",
+    "broken": false,
+    "broken_date": null
+  },
+  {
+    "level": 23270.0,
+    "sr_type": "support",
+    "touches": 3,
+    "dates": ["2026-05-05", "2026-05-12", "2026-05-20"],
+    "first_seen": "2026-05-05",
+    "last_seen": "2026-05-20",
+    "broken": false,
+    "broken_date": null
+  },
+  {
+    "level": 23125.0,
+    "sr_type": "support",
+    "touches": 3,
+    "dates": ["2026-04-28", "2026-05-07", "2026-05-12"],
+    "first_seen": "2026-04-28",
+    "last_seen": "2026-05-12",
+    "broken": false,
+    "broken_date": null
+  }
+]

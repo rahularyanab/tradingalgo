@@ -1,0 +1,19 @@
+[Unit]
+Description=Nifty Options Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/trading-algo
+ExecStart=/opt/trading-algo/venv/bin/python main.py
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=trading-bot
+EnvironmentFile=/opt/trading-algo/.env
+
+[Install]
+WantedBy=multi-user.target

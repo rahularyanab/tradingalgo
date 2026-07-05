@@ -1,0 +1,19 @@
+[Unit]
+Description=Nifty Options Paper Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/trading-algo
+ExecStart=/opt/trading-algo/venv/bin/python run_paper_trade.py
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=paper-trading
+EnvironmentFile=/opt/trading-algo/.env
+
+[Install]
+WantedBy=multi-user.target

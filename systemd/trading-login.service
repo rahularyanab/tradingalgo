@@ -1,0 +1,14 @@
+[Unit]
+Description=Zerodha Auto-Login (daily token refresh)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/trading-algo
+ExecStart=/opt/trading-algo/venv/bin/python scripts/auto_login.py
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=trading-login
+EnvironmentFile=/opt/trading-algo/.env

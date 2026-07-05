@@ -1,0 +1,11 @@
+# Secrets & tokens — never sync to server, never commit
+.access_token
+.env
+*.pyc
+__pycache__/
+logs/
+*.csv
+paper_state.json
+venv/
+.venv/
+.DS_Store
