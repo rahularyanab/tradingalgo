@@ -192,10 +192,6 @@ def _strangle_entry_allowed() -> bool:
     return now_mins < STRANGLE_CUTOFF_HOUR * 60 + STRANGLE_CUTOFF_MIN
 
 
-def _is_expiry_day() -> bool:
-    return datetime.now().weekday() == 1            # Tuesday
-
-
 def _parse_nifty_option_symbol(sym: str):
     """Parse Zerodha weekly NFO symbol e.g. NIFTY2670724100CE → (strike, expiry, opt_type)."""
     body = sym[5:]  # strip 'NIFTY'
@@ -745,7 +741,7 @@ def run_scan():
                 logger.info(f"Strangle single leg running: {strangle_legs.remaining_leg}")
 
         # ── New entry (no active trade) ───────────────────────────
-        elif not _is_expiry_day() and _entry_allowed():
+        elif _entry_allowed():
             final = combine_signals(
                 tl=tl_result, rsi=rsi_result, opt=opt_signal,
                 spot_price=spot, expiry=oc.weekly_expiry_date,
@@ -809,7 +805,7 @@ def run_scan():
                         errors = [r.error for r in (ce_res, pe_res) if not r.success]
                         send_error_alert(f"Strangle entry failed: {'; '.join(errors)}")
         else:
-            # Pre-10:00 observation window: send signal (observation=True so no trade implied)
+            # Outside entry window (before 10:00 or after force-exit): observe only
             final = combine_signals(
                 tl=tl_result, rsi=rsi_result, opt=opt_signal,
                 spot_price=spot, expiry=oc.weekly_expiry_date,
