@@ -856,6 +856,7 @@ def send_trade_journal_entry(
 
     REASON_LABEL = {
         "FORCE_EXIT_255PM": "2:55 PM force exit",
+        "FORCE_EXIT_325PM": "3:25 PM force exit",
         "SL_HIT":         "Stop loss hit",
         "MANAGEMENT_EXIT":"Position management exit",
     }

@@ -14,7 +14,8 @@ Trade management (every 15-min candle):
     Bearish 3/3  → exit + enter CALL SELL
     Bearish 2/3  → exit + enter STRANGLE
 
-Strangles held overnight. Directionals force-exited at 2:55 PM.
+Strangles held overnight. Directionals force-exited at 2:55 PM — split
+across 2:55/3:25 PM (ceil half now, floor half at 3:25) when 2+ lots are open.
 No new strangles on Friday after 12 PM.
 
 Requires:
@@ -27,6 +28,7 @@ import logging
 import math
 import sys
 import time
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -302,9 +304,77 @@ def _restore_positions_from_kite():
         logger.error(f"Position restore failed: {e}")
 
 
+def _close_directional_slice(trade, kite, spot, oc_exit, exit_qty, tag, time_label, remaining_qty=0):
+    """
+    Buy back `exit_qty` shares of the sold leg (and unwind the matching hedge
+    quantity), record P&L for that slice, and either close the trade fully
+    (remaining_qty == 0) or leave it open with `remaining_qty` shares running.
+    """
+    opt_type       = "CE" if trade.action == "CALL_SELL" else "PE"
+    exit_ltp       = None
+    hedge_exit_ltp = None
+    if kite and exit_qty > 0:
+        try:
+            sd = (oc_exit.call_data if opt_type == "CE" else oc_exit.put_data).get(trade.strike) if oc_exit else None
+            exit_ltp = sd.ltp if sd and sd.ltp > 0 else None
+            ep = _buy_price(oc_exit, opt_type, trade.strike) if oc_exit else None
+            r  = place_buy_order(kite, trade.symbol, exit_qty, price=ep)
+            if not r.success:
+                send_error_alert(f"Force exit order failed: {r.error}")
+            if trade.hedge_symbol and trade.hedge_strike and oc_exit:
+                hsd = (oc_exit.call_data if opt_type == "CE" else oc_exit.put_data).get(trade.hedge_strike)
+                hedge_exit_ltp = hsd.ltp if hsd and hsd.ltp > 0 else None
+                hp = _sell_price(oc_exit, opt_type, trade.hedge_strike)
+                place_sell_order(kite, trade.hedge_symbol, exit_qty, price=hp)
+        except Exception as e:
+            send_error_alert(f"Force exit order error: {e}")
+
+    main_pnl  = (trade.entry_premium - (exit_ltp or trade.entry_premium)) * exit_qty
+    hedge_pnl = (
+        (hedge_exit_ltp - trade.hedge_entry_premium) * exit_qty
+        if hedge_exit_ltp is not None and trade.hedge_entry_premium is not None else 0.0
+    )
+    total_pnl    = main_pnl + hedge_pnl
+    pnl_emoji    = "✅" if total_pnl >= 0 else "❌"
+    exit_s       = f"₹{exit_ltp:.2f}" if exit_ltp else "~market"
+    entry_spot_s = f"`{trade.entry_spot:.0f}`" if trade.entry_spot > 0 else "N/A"
+    exited_lots  = exit_qty // NIFTY_LOT_SIZE
+
+    header = f"🔔 *FORCE EXIT — {time_label}*" if remaining_qty == 0 else f"🔔 *PARTIAL FORCE EXIT — {time_label}*"
+    lines = [
+        header,
+        f"━━━━━━━━━━━━━━━━━━━━",
+        f"Trade: *{trade.action.replace('_', ' ')} {trade.strike}*  Expiry {trade.expiry}",
+        f"Entry spot: {entry_spot_s}  |  Exit spot: `{spot:.0f}`",
+        f"",
+        f"*LEGS*  ({exited_lots} lot{'s' if exited_lots != 1 else ''} / {exit_qty} shares)",
+        f"   Sold `{trade.strike}{opt_type}`:  ₹{trade.entry_premium:.2f} → *{exit_s}*   {_fmt_pnl(main_pnl)}",
+    ]
+    if trade.hedge_symbol and trade.hedge_entry_premium is not None:
+        hedge_exit_s = f"₹{hedge_exit_ltp:.2f}" if hedge_exit_ltp else "~market"
+        lines.append(f"   Hedge `{trade.hedge_strike}{opt_type}`:  ₹{trade.hedge_entry_premium:.2f} → *{hedge_exit_s}*   {_fmt_pnl(hedge_pnl)}")
+    lines += [
+        f"",
+        f"{pnl_emoji} *Net P&L: {_fmt_pnl(total_pnl)}*",
+    ]
+    if remaining_qty > 0:
+        remaining_lots = remaining_qty // NIFTY_LOT_SIZE
+        lines.append(f"📌 *{remaining_lots} lot{'s' if remaining_lots != 1 else ''} still running — exits at 3:25 PM*")
+    lines.append(f"━━━━━━━━━━━━━━━━━━━━")
+    _post("\n".join(lines))
+
+    journal_trade = replace(trade, lots=exit_qty)
+    _record_trade_exit(journal_trade, exit_ltp, hedge_exit_ltp, main_pnl, hedge_pnl, total_pnl, spot, tag)
+
+    if remaining_qty > 0:
+        monitor.trade.lots = remaining_qty
+    else:
+        monitor.clear_trade()
+
+
 def force_exit_all():
-    """2:55 PM — close directional trades. Strangles held overnight."""
-    global strangle_legs
+    """2:55 PM — close directional trades. Splits the exit across 2:55/3:25 PM
+    when 2+ lots are open (ceil half now, floor half at 3:25). Strangles held overnight."""
     if monitor.trade is None:
         return
 
@@ -333,59 +403,48 @@ def force_exit_all():
         )
         return
 
-    logger.info(f"2:55 PM force exit: {trade.action} {trade.strike}")
-    exit_ltp       = None
-    hedge_exit_ltp = None
-    if kite and trade.lots > 0:
+    oc_exit = None
+    if kite:
         try:
-            oc_exit  = fetch_option_chain(kite=kite)
-            opt_type = "CE" if trade.action == "CALL_SELL" else "PE"
-            if oc_exit:
-                sd = (oc_exit.call_data if opt_type == "CE" else oc_exit.put_data).get(trade.strike)
-                exit_ltp = sd.ltp if sd and sd.ltp > 0 else None
-            ep = _buy_price(oc_exit, opt_type, trade.strike) if oc_exit else None
-            r  = place_buy_order(kite, trade.symbol, trade.lots, price=ep)
-            if not r.success:
-                send_error_alert(f"Force exit order failed: {r.error}")
-            if trade.hedge_symbol and trade.hedge_strike and oc_exit:
-                hsd = (oc_exit.call_data if opt_type == "CE" else oc_exit.put_data).get(trade.hedge_strike)
-                hedge_exit_ltp = hsd.ltp if hsd and hsd.ltp > 0 else None
-                hp = _sell_price(oc_exit, opt_type, trade.hedge_strike)
-                place_sell_order(kite, trade.hedge_symbol, trade.lots, price=hp)
-        except Exception as e:
-            send_error_alert(f"Force exit order error: {e}")
+            oc_exit = fetch_option_chain(kite=kite)
+        except Exception:
+            oc_exit = None
 
-    main_pnl  = (trade.entry_premium - (exit_ltp or trade.entry_premium)) * trade.lots
-    hedge_pnl = (
-        (hedge_exit_ltp - trade.hedge_entry_premium) * trade.lots
-        if hedge_exit_ltp is not None and trade.hedge_entry_premium is not None else 0.0
+    num_lots = trade.lots // NIFTY_LOT_SIZE
+    if num_lots <= 1:
+        logger.info(f"2:55 PM force exit: {trade.action} {trade.strike}")
+        _close_directional_slice(trade, kite, spot, oc_exit, trade.lots,
+                                  tag="FORCE_EXIT_255PM", time_label="2:55 PM", remaining_qty=0)
+        return
+
+    first_lots  = -(-num_lots // 2)          # ceil(num_lots / 2)
+    second_lots = num_lots - first_lots
+    exit_qty    = first_lots  * NIFTY_LOT_SIZE
+    remain_qty  = second_lots * NIFTY_LOT_SIZE
+    logger.info(
+        f"2:55 PM partial force exit: {trade.action} {trade.strike}  "
+        f"{first_lots} lot(s) now, {second_lots} lot(s) held to 3:25 PM"
     )
-    total_pnl    = main_pnl + hedge_pnl
-    pnl_emoji    = "✅" if total_pnl >= 0 else "❌"
-    exit_s       = f"₹{exit_ltp:.2f}" if exit_ltp else "~market"
-    entry_spot_s = f"`{trade.entry_spot:.0f}`" if trade.entry_spot > 0 else "N/A"
-    opt_type     = "CE" if trade.action == "CALL_SELL" else "PE"
+    _close_directional_slice(trade, kite, spot, oc_exit, exit_qty,
+                              tag="FORCE_EXIT_255PM", time_label="2:55 PM", remaining_qty=remain_qty)
 
-    lines = [
-        f"🔔 *FORCE EXIT — 2:55 PM*",
-        f"━━━━━━━━━━━━━━━━━━━━",
-        f"Trade: *{trade.action.replace('_', ' ')} {trade.strike}*  Expiry {trade.expiry}",
-        f"Entry spot: {entry_spot_s}  |  Exit spot: `{spot:.0f}`",
-        f"",
-        f"*LEGS*",
-        f"   Sold `{trade.strike}{opt_type}`:  ₹{trade.entry_premium:.2f} → *{exit_s}*   {_fmt_pnl(main_pnl)}",
-    ]
-    if trade.hedge_symbol and trade.hedge_entry_premium is not None:
-        hedge_exit_s = f"₹{hedge_exit_ltp:.2f}" if hedge_exit_ltp else "~market"
-        lines.append(f"   Hedge `{trade.hedge_strike}{opt_type}`:  ₹{trade.hedge_entry_premium:.2f} → *{hedge_exit_s}*   {_fmt_pnl(hedge_pnl)}")
-    lines += [
-        f"",
-        f"{pnl_emoji} *Net P&L: {_fmt_pnl(total_pnl)}* ({trade.lots} shares)",
-        f"━━━━━━━━━━━━━━━━━━━━",
-    ]
-    _post("\n".join(lines))
-    _record_trade_exit(trade, exit_ltp, hedge_exit_ltp, main_pnl, hedge_pnl, total_pnl, spot, "FORCE_EXIT_255PM")
-    monitor.clear_trade()
+
+def force_exit_remaining():
+    """3:25 PM — close whatever's left of a directional trade after the 2:55 PM partial exit."""
+    if monitor.trade is None or monitor.trade.action == "STRANGLE":
+        return
+
+    trade = monitor.trade
+    try:
+        kite    = _get_kite()
+        spot    = get_current_nifty_price(kite)
+        oc_exit = fetch_option_chain(kite=kite)
+    except Exception:
+        kite, spot, oc_exit = None, 0.0, None
+
+    logger.info(f"3:25 PM force exit: {trade.action} {trade.strike}")
+    _close_directional_slice(trade, kite, spot, oc_exit, trade.lots,
+                              tag="FORCE_EXIT_325PM", time_label="3:25 PM", remaining_qty=0)
 
 
 def _register_strangle(signal, spot, oc):
@@ -823,7 +882,7 @@ def run_scan():
 def main():
     logger.info("Nifty Option Selling Bot starting...")
     logger.info(f"Entry: {ENTRY_START_HOUR:02d}:{ENTRY_START_MIN:02d} → {FORCE_EXIT_HOUR:02d}:{FORCE_EXIT_MIN:02d}")
-    logger.info("Strangles held overnight | Directionals force-closed at 2:55 PM")
+    logger.info("Strangles held overnight | Directionals: split exit 2:55 PM / 3:25 PM (single lot exits fully at 2:55 PM)")
 
     start_command_listener()
     _restore_positions_from_kite()
@@ -833,6 +892,7 @@ def main():
         schedule.every().hour.at(minute).do(run_scan)
 
     schedule.every().day.at("14:55").do(force_exit_all)
+    schedule.every().day.at("15:25").do(force_exit_remaining)
 
     while True:
         schedule.run_pending()
