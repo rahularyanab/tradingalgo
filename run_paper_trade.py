@@ -655,7 +655,7 @@ def _handle_management(decision, pos, trade, spot, tl, rsi, opt, oc):
     send_management_alert(decision, trade, spot, new_signal)
 
 
-# ── Force exit at 3 PM ────────────────────────────────────────────
+# ── Force exit at 2:55 PM ─────────────────────────────────────────
 
 def force_exit_all():
     global strangle_legs
@@ -697,11 +697,11 @@ def force_exit_all():
                 if sd and sd.ltp > 0:
                     ltp_map[leg.symbol] = sd.ltp
 
-        pnl = paper.exit_all_legs(pos, "FORCE_EXIT_3PM", ltp_map=ltp_map or None)
+        pnl = paper.exit_all_legs(pos, "FORCE_EXIT_255PM", ltp_map=ltp_map or None)
         monitor.clear_trade()
         strangle_legs = None
         summary = paper.get_position_summary(pos, spot, oc=oc)
-        send_paper_exit(summary, "FORCE_EXIT_3PM")
+        send_paper_exit(summary, "FORCE_EXIT_255PM")
         _save_state()
     except Exception as e:
         logger.exception(f"[PAPER] force_exit_all failed: {e}")
@@ -712,7 +712,7 @@ def end_of_day_summary():
     global _daily_loss_hit
     if not paper:
         return
-    # Force-exit any position that survived a crash+restart past 15:00
+    # Force-exit any position that survived a crash+restart past 14:55
     if paper.open_position:
         logger.warning("[PAPER] Open position found at EOD — running late force exit.")
         force_exit_all()
@@ -837,7 +837,7 @@ def run_scan():
                                    tl_result, rsi_result, opt_signal, oc)
             else:
                 # Skip P&L update at force exit time — force_exit_all sends the closing message
-                # and LTPs are unavailable once the market closes at 15:00
+                # and LTPs are unavailable once the market closes at 15:30
                 now = datetime.now()
                 if now.hour == FORCE_EXIT_HOUR and now.minute == FORCE_EXIT_MIN:
                     return
@@ -922,7 +922,7 @@ def main():
     for minute in [":00", ":15", ":30", ":45"]:
         schedule.every().hour.at(minute).do(run_scan)
 
-    schedule.every().day.at("15:00").do(force_exit_all)
+    schedule.every().day.at("14:55").do(force_exit_all)
     schedule.every().day.at("15:35").do(end_of_day_summary)
 
     while True:

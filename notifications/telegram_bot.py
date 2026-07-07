@@ -518,7 +518,7 @@ def send_paper_exit(pos_summary: dict, reason: str) -> bool:
         "SL_CALL":        "🚨 Stop Loss hit — Call leg",
         "SL_PUT":         "🚨 Stop Loss hit — Put leg",
         "TARGET":         "🎯 Target reached — 65% decay",
-        "FORCE_EXIT_3PM": "🔔 3:00 PM force exit",
+        "FORCE_EXIT_255PM": "🔔 2:55 PM force exit",
     }
     reason_label = REASON_LABEL.get(reason, f"📌 {reason}")
 
@@ -855,7 +855,7 @@ def send_trade_journal_entry(
         return f"+₹{p:,.0f}" if p >= 0 else f"−₹{abs(p):,.0f}"
 
     REASON_LABEL = {
-        "FORCE_EXIT_3PM": "3:00 PM force exit",
+        "FORCE_EXIT_255PM": "2:55 PM force exit",
         "SL_HIT":         "Stop loss hit",
         "MANAGEMENT_EXIT":"Position management exit",
     }

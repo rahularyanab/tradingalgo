@@ -14,8 +14,8 @@ Trade management (every 15-min candle):
     Bearish 3/3  → exit + enter CALL SELL
     Bearish 2/3  → exit + enter STRANGLE
 
-Strangles held overnight. Directionals force-exited at 3 PM.
-No new strangles on Friday after 12 PM. No trades on expiry day (Tuesday).
+Strangles held overnight. Directionals force-exited at 2:55 PM.
+No new strangles on Friday after 12 PM.
 
 Requires:
 1. .env with credentials
@@ -303,7 +303,7 @@ def _restore_positions_from_kite():
 
 
 def force_exit_all():
-    """3:00 PM — close directional trades. Strangles held overnight."""
+    """2:55 PM — close directional trades. Strangles held overnight."""
     global strangle_legs
     if monitor.trade is None:
         return
@@ -333,7 +333,7 @@ def force_exit_all():
         )
         return
 
-    logger.info(f"3:00 PM force exit: {trade.action} {trade.strike}")
+    logger.info(f"2:55 PM force exit: {trade.action} {trade.strike}")
     exit_ltp       = None
     hedge_exit_ltp = None
     if kite and trade.lots > 0:
@@ -367,7 +367,7 @@ def force_exit_all():
     opt_type     = "CE" if trade.action == "CALL_SELL" else "PE"
 
     lines = [
-        f"🔔 *FORCE EXIT — 3:00 PM*",
+        f"🔔 *FORCE EXIT — 2:55 PM*",
         f"━━━━━━━━━━━━━━━━━━━━",
         f"Trade: *{trade.action.replace('_', ' ')} {trade.strike}*  Expiry {trade.expiry}",
         f"Entry spot: {entry_spot_s}  |  Exit spot: `{spot:.0f}`",
@@ -384,7 +384,7 @@ def force_exit_all():
         f"━━━━━━━━━━━━━━━━━━━━",
     ]
     _post("\n".join(lines))
-    _record_trade_exit(trade, exit_ltp, hedge_exit_ltp, main_pnl, hedge_pnl, total_pnl, spot, "FORCE_EXIT_3PM")
+    _record_trade_exit(trade, exit_ltp, hedge_exit_ltp, main_pnl, hedge_pnl, total_pnl, spot, "FORCE_EXIT_255PM")
     monitor.clear_trade()
 
 
@@ -549,7 +549,7 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
                     f"💰 Locked: *{_fmt_pnl(locked_pnl)}*\n"
                     f"\n"
                     f"📌 *1 lot ({NIFTY_LOT_SIZE} shares) still running free*\n"
-                    f"Will exit on 2 consecutive opposing signals or 3 PM.\n"
+                    f"Will exit on 2 consecutive opposing signals or 2:55 PM.\n"
                     f"━━━━━━━━━━━━━━━━━━━━"
                 )
                 logger.info(f"Partial lock done: {lock_qty} exited @ {exit_ltp}, {NIFTY_LOT_SIZE} remaining")
@@ -823,7 +823,7 @@ def run_scan():
 def main():
     logger.info("Nifty Option Selling Bot starting...")
     logger.info(f"Entry: {ENTRY_START_HOUR:02d}:{ENTRY_START_MIN:02d} → {FORCE_EXIT_HOUR:02d}:{FORCE_EXIT_MIN:02d}")
-    logger.info("Strangles held overnight | Directionals force-closed at 3 PM")
+    logger.info("Strangles held overnight | Directionals force-closed at 2:55 PM")
 
     start_command_listener()
     _restore_positions_from_kite()
@@ -832,7 +832,7 @@ def main():
     for minute in [":00", ":15", ":30", ":45"]:
         schedule.every().hour.at(minute).do(run_scan)
 
-    schedule.every().day.at("15:00").do(force_exit_all)
+    schedule.every().day.at("14:55").do(force_exit_all)
 
     while True:
         schedule.run_pending()
