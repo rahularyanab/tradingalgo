@@ -301,7 +301,10 @@ def _fetch_option_chain_from_kite(kite) -> Optional[OptionChainData]:
                 continue
             symbol_map[(int(i["strike"]), i["instrument_type"])] = f"NFO:{i['tradingsymbol']}"
 
-        strikes = [atm + n * 50 for n in range(-15, 16)]
+        # ±25 strikes (1250 pts) — wider than the ATM proximity itself needs, because
+        # OTM puts hold premium further from spot than OTM calls (volatility skew), so
+        # the ₹3-8 hedge band for puts often falls outside a narrower symmetric window.
+        strikes = [atm + n * 50 for n in range(-25, 26)]
         to_quote = [
             symbol_map[(s, t)]
             for s in strikes for t in ("CE", "PE")
