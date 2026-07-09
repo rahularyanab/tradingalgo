@@ -76,7 +76,7 @@ STRANGLE_SL_BUFFER     = 50       # same as directional (80 pts made losses bigg
 # ── Lot sizing ────────────────────────────────────────────────────
 LOTS_STRONG        = 3            # directional STRONG signal (3/3)
 LOTS_MODERATE      = 2            # directional MODERATE signal (2/3)
-LOTS_STRANGLE      = 1            # each leg of a strangle (non-directional) — reduced from 2 (2026-07-09): margin was too tight for 2-lot strangles
+LOTS_STRANGLE      = 2            # each leg of a strangle (non-directional)
 
 # ── Scheduler ─────────────────────────────────────────────────────
 MARKET_OPEN_HOUR   = 9
