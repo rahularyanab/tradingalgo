@@ -36,7 +36,7 @@ from typing import Optional
 import schedule
 
 from auth.kite_login import load_access_token
-from execution.order_manager import place_sell_order, place_buy_order, place_spread_entry, square_off_position
+from execution.order_manager import place_sell_order, place_buy_order, place_spread_entry
 from config import (
     MARKET_OPEN_HOUR, MARKET_OPEN_MIN,
     MARKET_CLOSE_HOUR, MARKET_CLOSE_MIN,
@@ -44,7 +44,7 @@ from config import (
     FORCE_EXIT_HOUR, FORCE_EXIT_MIN,
     STRANGLE_CUTOFF_HOUR, STRANGLE_CUTOFF_MIN,
     FRIDAY_STRANGLE_CUTOFF, STRANGLE_SL_BUFFER,
-    NIFTY_LOT_SIZE, MANUAL_POSITION_MAX_LOSS,
+    NIFTY_LOT_SIZE,
 )
 from data.market_data import get_kite_client, fetch_nifty_candles, get_current_nifty_price
 from data.option_chain import fetch_option_chain
@@ -158,8 +158,6 @@ _kite_token   = None
 monitor       = TradeMonitor()
 strangle_legs: StrangleLegState | None = None   # tracks individual strangle legs
 _signal_exit_blocked: Optional[str]   = None    # direction blocked for rest of session after SIGNAL_EXIT
-_manual_loss_hit: bool = False    # True once the manual-position guard has squared off for the day
-_manual_loss_reset_date = None   # last date _manual_loss_hit was reset — detects day rollover
 
 
 def _get_kite():
@@ -304,86 +302,6 @@ def _restore_positions_from_kite():
             )
     except Exception as e:
         logger.error(f"Position restore failed: {e}")
-
-
-def _check_manual_positions():
-    """
-    Square off any open position the algo itself didn't place (e.g. trades
-    entered manually in the same Zerodha account) once their combined P&L
-    breaches -MANUAL_POSITION_MAX_LOSS. The algo's own trade — main leg and
-    hedge, or both strangle legs — is always excluded by tradingsymbol.
-    """
-    global _manual_loss_hit, _manual_loss_reset_date
-
-    today = datetime.now().date()
-    if _manual_loss_reset_date != today:
-        _manual_loss_hit        = False
-        _manual_loss_reset_date = today
-
-    if _manual_loss_hit:
-        return
-
-    try:
-        kite    = _get_kite()
-        all_pos = kite.positions()['net']
-    except Exception as e:
-        logger.warning(f"Manual position check: positions() failed: {e}")
-        return
-
-    algo_symbols = set()
-    if monitor.trade:
-        if monitor.trade.action == "STRANGLE":
-            algo_symbols.update(monitor.trade.symbol.split(" + "))
-        else:
-            algo_symbols.add(monitor.trade.symbol)
-        if monitor.trade.hedge_symbol:
-            algo_symbols.add(monitor.trade.hedge_symbol)
-
-    manual_positions = [
-        p for p in all_pos
-        if p.get('quantity', 0) != 0 and p.get('tradingsymbol') not in algo_symbols
-    ]
-    if not manual_positions:
-        return
-
-    total_pnl = sum(p.get('pnl', 0) for p in manual_positions)
-    logger.info(f"Manual positions MTM: {_fmt_pnl(total_pnl)}  ({len(manual_positions)} position(s))")
-
-    if total_pnl > -MANUAL_POSITION_MAX_LOSS:
-        return
-
-    logger.warning(
-        f"Manual position loss breach: {_fmt_pnl(total_pnl)}  "
-        f"≤  -₹{MANUAL_POSITION_MAX_LOSS:,} — squaring off"
-    )
-    closed = []
-    for p in manual_positions:
-        symbol   = p['tradingsymbol']
-        qty      = p['quantity']
-        exchange = p.get('exchange') or 'NFO'
-        product  = p.get('product') or 'NRML'
-        ltp      = p.get('last_price') or None
-        result = square_off_position(kite, symbol, qty, exchange=exchange, product=product, ltp=ltp)
-        if result.success:
-            closed.append((symbol, abs(qty), p.get('pnl', 0)))
-        else:
-            send_error_alert(f"Manual position square-off failed for {symbol}: {result.error}")
-
-    _manual_loss_hit = True
-    lines = [
-        f"🚨 *MANUAL POSITIONS SQUARED OFF*",
-        f"━━━━━━━━━━━━━━━━━━━━",
-        f"Combined loss {_fmt_pnl(total_pnl)} breached -₹{MANUAL_POSITION_MAX_LOSS:,} threshold.",
-        f"",
-    ]
-    for sym, qty, pnl in closed:
-        lines.append(f"   `{sym}`  qty={qty}   {_fmt_pnl(pnl)}")
-    lines += [
-        f"",
-        f"_Algo's own trade left untouched. No more manual-position checks today._",
-        f"━━━━━━━━━━━━━━━━━━━━",
-    ]
-    _post("\n".join(lines))
 
 
 def _close_directional_slice(trade, kite, spot, oc_exit, exit_qty, tag, time_label, remaining_qty=0):
@@ -815,12 +733,6 @@ def run_scan():
 
     try:
         kite = _get_kite()
-
-        try:
-            _check_manual_positions()
-        except Exception as e:
-            logger.exception(f"Manual position check failed: {e}")
-
         df   = fetch_nifty_candles(kite)
         spot = get_current_nifty_price(kite)
         oc   = fetch_option_chain(kite=kite)

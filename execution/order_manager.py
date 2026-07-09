@@ -38,7 +38,6 @@ def place_sell_order(
     quantity: int,
     product:  str   = "NRML",
     price:    Optional[float] = None,
-    exchange: Optional[str]   = None,
 ) -> OrderResult:
     """
     Place a SELL limit order for an NFO option.
@@ -48,7 +47,7 @@ def place_sell_order(
         logger.warning(f"place_sell_order called without price for {symbol} — order will likely fail")
     order_kwargs = dict(
         variety          = kite.VARIETY_REGULAR,
-        exchange         = exchange or kite.EXCHANGE_NFO,
+        exchange         = kite.EXCHANGE_NFO,
         tradingsymbol    = symbol,
         transaction_type = kite.TRANSACTION_TYPE_SELL,
         quantity         = quantity,
@@ -73,7 +72,6 @@ def place_buy_order(
     quantity: int,
     product:  str   = "NRML",
     price:    Optional[float] = None,
-    exchange: Optional[str]   = None,
 ) -> OrderResult:
     """
     Place a BUY limit order (covering a sold option).
@@ -83,7 +81,7 @@ def place_buy_order(
         logger.warning(f"place_buy_order called without price for {symbol} — order will likely fail")
     order_kwargs = dict(
         variety          = kite.VARIETY_REGULAR,
-        exchange         = exchange or kite.EXCHANGE_NFO,
+        exchange         = kite.EXCHANGE_NFO,
         tradingsymbol    = symbol,
         transaction_type = kite.TRANSACTION_TYPE_BUY,
         quantity         = quantity,
@@ -100,27 +98,6 @@ def place_buy_order(
     except Exception as e:
         logger.error(f"BUY order failed: {symbol}  error={e}")
         return OrderResult(False, None, str(e), symbol, "BUY", quantity, product)
-
-
-def square_off_position(
-    kite,
-    symbol:   str,
-    quantity: int,     # signed, as returned by kite.positions(): negative = short, positive = long
-    exchange: str,
-    product:  str,
-    ltp:      Optional[float] = None,
-) -> OrderResult:
-    """
-    Close an existing position by trading opposite to its current quantity sign.
-    Used for positions not opened by this bot (e.g. manually placed trades) —
-    exchange/product come from the broker's own position record rather than
-    being assumed, since these positions can be on any segment.
-    """
-    if quantity < 0:
-        return place_buy_order(kite, symbol, abs(quantity), product=product, price=ltp, exchange=exchange)
-    elif quantity > 0:
-        return place_sell_order(kite, symbol, abs(quantity), product=product, price=ltp, exchange=exchange)
-    return OrderResult(True, None, "quantity is zero — nothing to close", symbol, "NONE", 0, product)
 
 
 def place_spread_entry(

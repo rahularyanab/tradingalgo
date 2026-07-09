@@ -94,6 +94,3 @@ REVERSAL_CONFIRM_CANDLES = 2     # consecutive reversal candles before adding he
 CLEAN_CONFIRM_CANDLES    = 2     # consecutive clean candles before removing hedge
 DAILY_MAX_LOSS           = 5000  # ₹ daily circuit breaker (realised + unrealised)
 PARTIAL_PROFIT_LOCK_PNL  = 5000  # ₹ unrealised threshold → exit all-but-1-lot to lock profit
-
-# ── Manual position guard (positions in the account NOT placed by the algo) ──
-MANUAL_POSITION_MAX_LOSS = 20000  # ₹ loss on non-algo positions → square them all off (algo's own trade left alone)
