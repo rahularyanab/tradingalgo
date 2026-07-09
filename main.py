@@ -682,36 +682,114 @@ def _check_sl_hit(kite, trade: TradeState, spot: float, oc=None) -> bool:
     logger.warning(
         f"SL HIT: {trade.action} {trade.strike}  spot={spot:.1f}  SL={trade.sl_spot_level:.1f}"
     )
+
+    if trade.action == "STRANGLE" and strangle_legs:
+        legs = strangle_legs
+        leg_lines = []
+        total_pnl = 0.0
+        if legs.ce_active:
+            sd = oc.call_data.get(legs.ce_strike) if oc else None
+            ce_exit_ltp = sd.ltp if sd and sd.ltp > 0 else None
+            try:
+                ep = _buy_price(oc, "CE", legs.ce_strike) if oc else None
+                place_buy_order(kite, legs.ce_symbol, trade.lots, price=ep)
+                hedge_ce_exit_ltp = None
+                if legs.hedge_ce_symbol:
+                    hsd = oc.call_data.get(legs.hedge_ce_strike) if oc else None
+                    hedge_ce_exit_ltp = hsd.ltp if hsd and hsd.ltp > 0 else None
+                    hp = _sell_price(oc, "CE", legs.hedge_ce_strike) if oc else None
+                    place_sell_order(kite, legs.hedge_ce_symbol, trade.lots, price=hp)
+            except Exception as e:
+                send_error_alert(f"CE SL exit order error: {e}")
+                hedge_ce_exit_ltp = None
+            ce_main_pnl  = (legs.ce_entry_premium - (ce_exit_ltp or legs.ce_entry_premium)) * trade.lots
+            ce_hedge_pnl = (
+                (hedge_ce_exit_ltp - legs.hedge_ce_entry_premium) * trade.lots
+                if hedge_ce_exit_ltp is not None and legs.hedge_ce_entry_premium is not None else 0.0
+            )
+            total_pnl += ce_main_pnl + ce_hedge_pnl
+            leg_lines.append(f"   Sold `{legs.ce_strike}CE`:  ₹{legs.ce_entry_premium:.2f} → *{f'₹{ce_exit_ltp:.2f}' if ce_exit_ltp else '~market'}*   {_fmt_pnl(ce_main_pnl)}")
+            if legs.hedge_ce_symbol:
+                leg_lines.append(f"   Hedge `{legs.hedge_ce_strike}CE`:  {_fmt_pnl(ce_hedge_pnl)}")
+            ce_leg_trade = TradeState(
+                action="STRANGLE_CE", strike=legs.ce_strike, symbol=legs.ce_symbol,
+                entry_time=trade.entry_time, entry_premium=legs.ce_entry_premium,
+                entry_spot=trade.entry_spot, sl_spot_level=trade.sl_spot_level, expiry=trade.expiry,
+                lots=trade.lots, hedge_symbol=legs.hedge_ce_symbol, hedge_strike=legs.hedge_ce_strike,
+                hedge_entry_premium=legs.hedge_ce_entry_premium,
+            )
+            _record_trade_exit(ce_leg_trade, ce_exit_ltp, hedge_ce_exit_ltp, ce_main_pnl, ce_hedge_pnl,
+                                ce_main_pnl + ce_hedge_pnl, spot, "SL_HIT")
+
+        if legs.pe_active:
+            sd = oc.put_data.get(legs.pe_strike) if oc else None
+            pe_exit_ltp = sd.ltp if sd and sd.ltp > 0 else None
+            try:
+                ep = _buy_price(oc, "PE", legs.pe_strike) if oc else None
+                place_buy_order(kite, legs.pe_symbol, trade.lots, price=ep)
+                hedge_pe_exit_ltp = None
+                if legs.hedge_pe_symbol:
+                    hsd = oc.put_data.get(legs.hedge_pe_strike) if oc else None
+                    hedge_pe_exit_ltp = hsd.ltp if hsd and hsd.ltp > 0 else None
+                    hp = _sell_price(oc, "PE", legs.hedge_pe_strike) if oc else None
+                    place_sell_order(kite, legs.hedge_pe_symbol, trade.lots, price=hp)
+            except Exception as e:
+                send_error_alert(f"PE SL exit order error: {e}")
+                hedge_pe_exit_ltp = None
+            pe_main_pnl  = (legs.pe_entry_premium - (pe_exit_ltp or legs.pe_entry_premium)) * trade.lots
+            pe_hedge_pnl = (
+                (hedge_pe_exit_ltp - legs.hedge_pe_entry_premium) * trade.lots
+                if hedge_pe_exit_ltp is not None and legs.hedge_pe_entry_premium is not None else 0.0
+            )
+            total_pnl += pe_main_pnl + pe_hedge_pnl
+            leg_lines.append(f"   Sold `{legs.pe_strike}PE`:  ₹{legs.pe_entry_premium:.2f} → *{f'₹{pe_exit_ltp:.2f}' if pe_exit_ltp else '~market'}*   {_fmt_pnl(pe_main_pnl)}")
+            if legs.hedge_pe_symbol:
+                leg_lines.append(f"   Hedge `{legs.hedge_pe_strike}PE`:  {_fmt_pnl(pe_hedge_pnl)}")
+            pe_leg_trade = TradeState(
+                action="STRANGLE_PE", strike=legs.pe_strike, symbol=legs.pe_symbol,
+                entry_time=trade.entry_time, entry_premium=legs.pe_entry_premium,
+                entry_spot=trade.entry_spot, sl_spot_level=trade.sl_spot_level, expiry=trade.expiry,
+                lots=trade.lots, hedge_symbol=legs.hedge_pe_symbol, hedge_strike=legs.hedge_pe_strike,
+                hedge_entry_premium=legs.hedge_pe_entry_premium,
+            )
+            _record_trade_exit(pe_leg_trade, pe_exit_ltp, hedge_pe_exit_ltp, pe_main_pnl, pe_hedge_pnl,
+                                pe_main_pnl + pe_hedge_pnl, spot, "SL_HIT")
+
+        pnl_emoji    = "✅" if total_pnl >= 0 else "❌"
+        entry_spot_s = f"`{trade.entry_spot:.0f}`" if trade.entry_spot > 0 else "N/A"
+        lines = [
+            f"🚨 *SL HIT — STRANGLE CLOSED*",
+            f"━━━━━━━━━━━━━━━━━━━━",
+            f"Trade: *STRANGLE {trade.strike}*  Expiry {trade.expiry}",
+            f"Entry spot: {entry_spot_s}  →  now `{spot:.0f}`",
+            f"",
+            f"*LEGS*",
+            *leg_lines,
+            f"",
+            f"{pnl_emoji} *Net P&L: {_fmt_pnl(total_pnl)}* ({trade.lots} shares each leg)",
+            f"━━━━━━━━━━━━━━━━━━━━",
+        ]
+        _post("\n".join(lines))
+        monitor.clear_trade()
+        strangle_legs = None
+        return True
+
     opt_type       = "CE" if trade.action == "CALL_SELL" else "PE"
     exit_ltp       = None
     hedge_exit_ltp = None
     if trade.lots > 0:
         try:
-            if trade.action == "STRANGLE" and strangle_legs:
-                if strangle_legs.ce_active:
-                    ep = _buy_price(oc, "CE", strangle_legs.ce_strike) if oc else None
-                    place_buy_order(kite, strangle_legs.ce_symbol, trade.lots, price=ep)
-                    if strangle_legs.hedge_ce_symbol:
-                        hp = _sell_price(oc, "CE", strangle_legs.hedge_ce_strike) if oc else None
-                        place_sell_order(kite, strangle_legs.hedge_ce_symbol, trade.lots, price=hp)
-                if strangle_legs.pe_active:
-                    ep = _buy_price(oc, "PE", strangle_legs.pe_strike) if oc else None
-                    place_buy_order(kite, strangle_legs.pe_symbol, trade.lots, price=ep)
-                    if strangle_legs.hedge_pe_symbol:
-                        hp = _sell_price(oc, "PE", strangle_legs.hedge_pe_strike) if oc else None
-                        place_sell_order(kite, strangle_legs.hedge_pe_symbol, trade.lots, price=hp)
-            else:
+            if oc:
+                sd = (oc.call_data if opt_type == "CE" else oc.put_data).get(trade.strike)
+                exit_ltp = sd.ltp if sd and sd.ltp > 0 else None
+            ep = _buy_price(oc, opt_type, trade.strike) if oc else None
+            place_buy_order(kite, trade.symbol, trade.lots, price=ep)
+            if trade.hedge_symbol and trade.hedge_strike:
                 if oc:
-                    sd = (oc.call_data if opt_type == "CE" else oc.put_data).get(trade.strike)
-                    exit_ltp = sd.ltp if sd and sd.ltp > 0 else None
-                ep = _buy_price(oc, opt_type, trade.strike) if oc else None
-                place_buy_order(kite, trade.symbol, trade.lots, price=ep)
-                if trade.hedge_symbol and trade.hedge_strike:
-                    if oc:
-                        hsd = (oc.call_data if opt_type == "CE" else oc.put_data).get(trade.hedge_strike)
-                        hedge_exit_ltp = hsd.ltp if hsd and hsd.ltp > 0 else None
-                    hp = _sell_price(oc, opt_type, trade.hedge_strike) if oc else None
-                    place_sell_order(kite, trade.hedge_symbol, trade.lots, price=hp)
+                    hsd = (oc.call_data if opt_type == "CE" else oc.put_data).get(trade.hedge_strike)
+                    hedge_exit_ltp = hsd.ltp if hsd and hsd.ltp > 0 else None
+                hp = _sell_price(oc, opt_type, trade.hedge_strike) if oc else None
+                place_sell_order(kite, trade.hedge_symbol, trade.lots, price=hp)
         except Exception as e:
             send_error_alert(f"SL exit order error: {e}")
 
@@ -836,18 +914,57 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
         hedge_exit_ltp = None
         if qty > 0:
             if trade.action == "STRANGLE" and strangle_legs:
+                tag = "STRANGLE_TARGET" if decision.reason.startswith("Target hit") else "STRANGLE_SIGNAL_EXIT"
                 if strangle_legs.ce_active:
+                    sd = oc.call_data.get(strangle_legs.ce_strike)
+                    ce_exit_ltp = sd.ltp if sd and sd.ltp > 0 else None
                     r = place_buy_order(kite, strangle_legs.ce_symbol, qty, price=_buy_price(oc, "CE", strangle_legs.ce_strike))
                     if not r.success: send_error_alert(f"CE exit failed: {r.error}")
+                    hedge_ce_exit_ltp = None
                     if strangle_legs.hedge_ce_symbol:
+                        hsd = oc.call_data.get(strangle_legs.hedge_ce_strike)
+                        hedge_ce_exit_ltp = hsd.ltp if hsd and hsd.ltp > 0 else None
                         hr = place_sell_order(kite, strangle_legs.hedge_ce_symbol, qty, price=_sell_price(oc, "CE", strangle_legs.hedge_ce_strike))
                         if not hr.success: send_error_alert(f"CE hedge unwind failed: {hr.error}")
+                    ce_main_pnl  = (strangle_legs.ce_entry_premium - (ce_exit_ltp or strangle_legs.ce_entry_premium)) * qty
+                    ce_hedge_pnl = (
+                        (hedge_ce_exit_ltp - strangle_legs.hedge_ce_entry_premium) * qty
+                        if hedge_ce_exit_ltp is not None and strangle_legs.hedge_ce_entry_premium is not None else 0.0
+                    )
+                    ce_leg_trade = TradeState(
+                        action="STRANGLE_CE", strike=strangle_legs.ce_strike, symbol=strangle_legs.ce_symbol,
+                        entry_time=trade.entry_time, entry_premium=strangle_legs.ce_entry_premium,
+                        entry_spot=trade.entry_spot, sl_spot_level=trade.sl_spot_level, expiry=trade.expiry,
+                        lots=qty, hedge_symbol=strangle_legs.hedge_ce_symbol, hedge_strike=strangle_legs.hedge_ce_strike,
+                        hedge_entry_premium=strangle_legs.hedge_ce_entry_premium,
+                    )
+                    _record_trade_exit(ce_leg_trade, ce_exit_ltp, hedge_ce_exit_ltp, ce_main_pnl, ce_hedge_pnl,
+                                        ce_main_pnl + ce_hedge_pnl, spot, tag)
                 if strangle_legs.pe_active:
+                    sd = oc.put_data.get(strangle_legs.pe_strike)
+                    pe_exit_ltp = sd.ltp if sd and sd.ltp > 0 else None
                     r = place_buy_order(kite, strangle_legs.pe_symbol, qty, price=_buy_price(oc, "PE", strangle_legs.pe_strike))
                     if not r.success: send_error_alert(f"PE exit failed: {r.error}")
+                    hedge_pe_exit_ltp = None
                     if strangle_legs.hedge_pe_symbol:
+                        hsd = oc.put_data.get(strangle_legs.hedge_pe_strike)
+                        hedge_pe_exit_ltp = hsd.ltp if hsd and hsd.ltp > 0 else None
                         hr = place_sell_order(kite, strangle_legs.hedge_pe_symbol, qty, price=_sell_price(oc, "PE", strangle_legs.hedge_pe_strike))
                         if not hr.success: send_error_alert(f"PE hedge unwind failed: {hr.error}")
+                    pe_main_pnl  = (strangle_legs.pe_entry_premium - (pe_exit_ltp or strangle_legs.pe_entry_premium)) * qty
+                    pe_hedge_pnl = (
+                        (hedge_pe_exit_ltp - strangle_legs.hedge_pe_entry_premium) * qty
+                        if hedge_pe_exit_ltp is not None and strangle_legs.hedge_pe_entry_premium is not None else 0.0
+                    )
+                    pe_leg_trade = TradeState(
+                        action="STRANGLE_PE", strike=strangle_legs.pe_strike, symbol=strangle_legs.pe_symbol,
+                        entry_time=trade.entry_time, entry_premium=strangle_legs.pe_entry_premium,
+                        entry_spot=trade.entry_spot, sl_spot_level=trade.sl_spot_level, expiry=trade.expiry,
+                        lots=qty, hedge_symbol=strangle_legs.hedge_pe_symbol, hedge_strike=strangle_legs.hedge_pe_strike,
+                        hedge_entry_premium=strangle_legs.hedge_pe_entry_premium,
+                    )
+                    _record_trade_exit(pe_leg_trade, pe_exit_ltp, hedge_pe_exit_ltp, pe_main_pnl, pe_hedge_pnl,
+                                        pe_main_pnl + pe_hedge_pnl, spot, tag)
             else:
                 sd = (oc.call_data if opt_type == "CE" else oc.put_data).get(trade.strike)
                 exit_ltp = sd.ltp if sd and sd.ltp > 0 else None
@@ -983,6 +1100,16 @@ def run_scan():
             live_sd       = (oc.call_data if opt_type_live == "CE" else oc.put_data).get(trade.strike)
             current_ltp   = live_sd.ltp if live_sd and live_sd.ltp > 0 else None
 
+            # Current LTPs of both strangle legs (for the target-decay check)
+            strangle_ce_ltp = strangle_pe_ltp = None
+            if trade.action == "STRANGLE" and strangle_legs:
+                if strangle_legs.ce_active:
+                    ce_sd = oc.call_data.get(strangle_legs.ce_strike)
+                    strangle_ce_ltp = ce_sd.ltp if ce_sd and ce_sd.ltp > 0 else None
+                if strangle_legs.pe_active:
+                    pe_sd = oc.put_data.get(strangle_legs.pe_strike)
+                    strangle_pe_ltp = pe_sd.ltp if pe_sd and pe_sd.ltp > 0 else None
+
             # Position manager: should we adjust/exit/reverse?
             pm_decision = evaluate_position(
                 trade=trade,
@@ -994,6 +1121,8 @@ def run_scan():
                 clean_after_hedge_count=monitor.clean_after_hedge_count,
                 hedge_active=monitor.hedge_active,
                 current_ltp=current_ltp,
+                strangle_ce_ltp=strangle_ce_ltp,
+                strangle_pe_ltp=strangle_pe_ltp,
             )
 
             if pm_decision.action != HOLD:

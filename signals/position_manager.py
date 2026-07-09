@@ -24,7 +24,7 @@ from typing import Optional
 from config import (PCR_BULLISH, PCR_BEARISH, MIN_SIGNAL_SCORE,
                     ROLL_THRESHOLD_PTS, MAX_ROLLS_PER_DAY,
                     BREAKOUT_CONFIRM_CANDLES, REVERSAL_CONFIRM_CANDLES, CLEAN_CONFIRM_CANDLES,
-                    PARTIAL_PROFIT_LOCK_PNL, NIFTY_LOT_SIZE)
+                    PARTIAL_PROFIT_LOCK_PNL, NIFTY_LOT_SIZE, TARGET_DECAY_PCT)
 from strategy.trendline import TrendlineResult
 from strategy.rsi_divergence import RSIResult
 from strategy.option_signal import OptionSignal
@@ -150,6 +150,8 @@ def evaluate_position(
     hedge_active:            bool = False,
     roll_ctx:                Optional[RollContext] = None,
     current_ltp:             Optional[float] = None,
+    strangle_ce_ltp:         Optional[float] = None,
+    strangle_pe_ltp:         Optional[float] = None,
 ) -> ManagementDecision:
     """
     Evaluate what to do with the current position on this candle.
@@ -161,6 +163,30 @@ def evaluate_position(
     # ── STRANGLE management ───────────────────────────────────────
     if trade.action == "STRANGLE":
         legs = strangle_legs
+
+        # Target check first — a profitable target takes priority over
+        # adjusting a single leg. Same formula as the paper-trading engine:
+        # combined entry premium vs. current premium of whichever legs are
+        # still active (a leg already closed keeps counting toward the
+        # original combined baseline, same as paper trading does).
+        if legs:
+            current_prems = []
+            if legs.ce_active and strangle_ce_ltp is not None:
+                current_prems.append(strangle_ce_ltp)
+            if legs.pe_active and strangle_pe_ltp is not None:
+                current_prems.append(strangle_pe_ltp)
+            active_count = (1 if legs.ce_active else 0) + (1 if legs.pe_active else 0)
+            if current_prems and len(current_prems) == active_count:
+                target_prem = trade.entry_premium * (1 - TARGET_DECAY_PCT)
+                if sum(current_prems) <= target_prem:
+                    return ManagementDecision(
+                        action=EXIT_FULL,
+                        reason=(
+                            f"Target hit: combined premium ₹{sum(current_prems):.2f} "
+                            f"≤ ₹{target_prem:.2f} ({int(TARGET_DECAY_PCT*100)}% decay from ₹{trade.entry_premium:.2f})"
+                        ),
+                        score=0,
+                    )
 
         if legs and legs.ce_active and legs.pe_active:
             # Both legs open — check if one side is threatened

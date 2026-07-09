@@ -849,7 +849,7 @@ def send_trade_journal_entry(
 ) -> bool:
     time_s, date_s = _now_str()
     pnl_emoji = "✅" if total_pnl >= 0 else "❌"
-    opt_type  = "CE" if trade.action == "CALL_SELL" else "PE"
+    opt_type  = "CE" if trade.action in ("CALL_SELL", "STRANGLE_CE") else "PE"
 
     def _fmt(p: float) -> str:
         return f"+₹{p:,.0f}" if p >= 0 else f"−₹{abs(p):,.0f}"
@@ -859,6 +859,8 @@ def send_trade_journal_entry(
         "FORCE_EXIT_325PM": "3:25 PM force exit",
         "SL_HIT":         "Stop loss hit",
         "MANAGEMENT_EXIT":"Position management exit",
+        "STRANGLE_TARGET":     "Target hit — 65% premium decay",
+        "STRANGLE_SIGNAL_EXIT":"Signal-based full exit",
     }
 
     entry_spot_s = f"{trade.entry_spot:.0f}" if trade.entry_spot > 0 else "—"
