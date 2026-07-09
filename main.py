@@ -24,6 +24,7 @@ Requires:
 """
 
 import csv
+import json
 import logging
 import math
 import sys
@@ -196,114 +197,160 @@ def _strangle_entry_allowed() -> bool:
     return now_mins < STRANGLE_CUTOFF_HOUR * 60 + STRANGLE_CUTOFF_MIN
 
 
-def _parse_nifty_option_symbol(sym: str):
-    """Parse Zerodha weekly NFO symbol e.g. NIFTY2670724100CE → (strike, expiry, opt_type)."""
-    body = sym[5:]  # strip 'NIFTY'
-    yy   = body[0:2]
-    mm   = body[2]
-    dd   = body[3:5]
-    opt_type = body[-2:]   # 'CE' or 'PE'
-    strike_str = body[5:-2]
-    MONTHS = {'1':'Jan','2':'Feb','3':'Mar','4':'Apr','5':'May','6':'Jun',
-               '7':'Jul','8':'Aug','9':'Sep','O':'Oct','N':'Nov','D':'Dec'}
-    month_name = MONTHS.get(mm, 'Jul')
-    return int(strike_str), f"{dd}-{month_name}-20{yy}", opt_type
+_STATE_FILE = Path(__file__).parent / "logs" / "algo_trade_state.json"
+
+
+def _save_state():
+    """
+    Persist exactly what THIS bot placed to disk. This is the only source of
+    truth used to restore state on restart — never re-derived by guessing
+    from whatever happens to be open in the Kite account, since that can't
+    be told apart from a position placed manually in the same account.
+    """
+    trade = monitor.trade
+    state = {"date": datetime.now().strftime("%Y-%m-%d"), "trade": None, "strangle_legs": None}
+
+    if trade:
+        state["trade"] = {
+            "action":                trade.action,
+            "strike":                trade.strike,
+            "symbol":                trade.symbol,
+            "entry_time":            trade.entry_time.strftime("%Y-%m-%d %H:%M:%S"),
+            "entry_premium":         trade.entry_premium,
+            "entry_spot":            trade.entry_spot,
+            "sl_spot_level":         trade.sl_spot_level,
+            "expiry":                trade.expiry,
+            "entry_put_wall":        trade.entry_put_wall,
+            "entry_call_wall":       trade.entry_call_wall,
+            "entry_resistance":      trade.entry_resistance,
+            "entry_support":         trade.entry_support,
+            "lots":                  trade.lots,
+            "hedge_symbol":          trade.hedge_symbol,
+            "hedge_strike":          trade.hedge_strike,
+            "hedge_entry_premium":   trade.hedge_entry_premium,
+            "sl_put":                trade.sl_put,
+            "partial_profit_locked": trade.partial_profit_locked,
+        }
+        if trade.action == "STRANGLE" and strangle_legs:
+            sl = strangle_legs
+            state["strangle_legs"] = {
+                "ce_strike":        sl.ce_strike,
+                "ce_symbol":        sl.ce_symbol,
+                "ce_entry_premium": sl.ce_entry_premium,
+                "pe_strike":        sl.pe_strike,
+                "pe_symbol":        sl.pe_symbol,
+                "pe_entry_premium": sl.pe_entry_premium,
+                "ce_active":        sl.ce_active,
+                "pe_active":        sl.pe_active,
+            }
+
+    try:
+        _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _STATE_FILE.write_text(json.dumps(state, indent=2))
+    except Exception as e:
+        logger.error(f"Failed to save trade state: {e}")
 
 
 def _restore_positions_from_kite():
-    """On startup, restore monitor trade state from existing Kite positions (nearest weekly expiry only)."""
-    from datetime import date
-    import re
+    """
+    On startup, restore the algo's own trade ONLY from what this process
+    itself persisted (_STATE_FILE) — not by scanning Kite positions and
+    guessing, which can't distinguish the algo's trade from one placed
+    manually in the same account. Cross-checks against live positions so a
+    stale/closed trade doesn't get resurrected.
+    """
+    global strangle_legs
 
-    MONTH_MAP = {'1':1,'2':2,'3':3,'4':4,'5':5,'6':6,
-                 '7':7,'8':8,'9':9,'O':10,'N':11,'D':12}
+    if not _STATE_FILE.exists():
+        logger.info("No persisted trade state — starting flat.")
+        return
 
-    def expiry_date(sym: str) -> date:
-        body = sym[5:]
-        yy, mm_char, dd = int(body[0:2]), body[2], int(body[3:5])
-        return date(2000 + yy, MONTH_MAP.get(mm_char, 7), dd)
+    try:
+        state = json.loads(_STATE_FILE.read_text())
+    except Exception as e:
+        logger.error(f"Failed to read persisted trade state: {e}")
+        return
+
+    if state.get("date") != datetime.now().strftime("%Y-%m-%d"):
+        logger.info("Persisted trade state is from a previous day — discarding.")
+        _STATE_FILE.unlink(missing_ok=True)
+        return
+
+    t = state.get("trade")
+    if not t:
+        return
 
     try:
         kite = _get_kite()
-        all_pos = kite.positions()['net']
-        nfty = [
-            p for p in all_pos
-            if p.get('exchange') == 'NFO'
-            and re.match(r'^NIFTY\d{2}[0-9OND]\d{2}\d{4,5}(CE|PE)$', p.get('tradingsymbol', ''))
-            and p['quantity'] != 0
-        ]
-        if not nfty:
-            return
-
-        # Find the nearest expiry among all NIFTY positions
-        nearest = min(nfty, key=lambda p: expiry_date(p['tradingsymbol']))
-        nearest_exp = expiry_date(nearest['tradingsymbol'])
-
-        # Only use positions from that nearest expiry
-        week_pos    = [p for p in nfty if expiry_date(p['tradingsymbol']) == nearest_exp]
-        short_legs  = [p for p in week_pos if p['quantity'] < 0]
-        long_legs   = [p for p in week_pos if p['quantity'] > 0]
-
-        if not short_legs:
-            return
-
-        ce_short = next((p for p in short_legs if p['tradingsymbol'].endswith('CE')), None)
-        pe_short = next((p for p in short_legs if p['tradingsymbol'].endswith('PE')), None)
-
-        if ce_short and pe_short:
-            # Strangle
-            ce_strike, expiry, _ = _parse_nifty_option_symbol(ce_short['tradingsymbol'])
-            pe_strike, _,      _ = _parse_nifty_option_symbol(pe_short['tradingsymbol'])
-            qty = abs(ce_short['quantity'])
-            monitor.set_trade(TradeState(
-                action="STRANGLE",
-                strike=ce_strike,
-                symbol=f"{ce_short['tradingsymbol']} + {pe_short['tradingsymbol']}",
-                entry_time=datetime.now(),
-                entry_premium=abs(ce_short['average_price']) + abs(pe_short['average_price']),
-                entry_spot=0,
-                sl_spot_level=float(ce_strike),
-                sl_put=float(pe_strike),
-                expiry=expiry,
-                lots=qty,
-            ))
-        else:
-            sp = ce_short or pe_short
-            strike, expiry, opt_type = _parse_nifty_option_symbol(sp['tradingsymbol'])
-            action = 'CALL_SELL' if opt_type == 'CE' else 'PUT_SELL'
-            # Find matching hedge (same expiry, opposite direction)
-            hedge_p             = long_legs[0] if long_legs else None
-            hedge_sym           = hedge_p['tradingsymbol'] if hedge_p else None
-            hedge_strike        = _parse_nifty_option_symbol(hedge_sym)[0] if hedge_sym else None
-            hedge_entry_premium = abs(hedge_p['average_price']) if hedge_p else None
-            monitor.set_trade(TradeState(
-                action=action,
-                strike=strike,
-                symbol=sp['tradingsymbol'],
-                entry_time=datetime.now(),
-                entry_premium=abs(sp['average_price']),
-                entry_spot=0,
-                sl_spot_level=float(strike),
-                expiry=expiry,
-                lots=abs(sp['quantity']),
-                hedge_symbol=hedge_sym,
-                hedge_strike=hedge_strike,
-                hedge_entry_premium=hedge_entry_premium,
-            ))
-
-        t = monitor.trade
-        if t:
-            logger.info(f"Restored {t.action} {t.strike}  qty={t.lots}  hedge={t.hedge_symbol}")
-            _post(
-                f"♻️ *Position Restored on Restart*\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"Trade: *{t.action.replace('_',' ')} {t.strike}*  qty={t.lots}\n"
-                f"Avg entry: ₹{t.entry_premium:.2f}  |  Expiry: {t.expiry}\n"
-                f"SL spot: {t.sl_spot_level:.0f}  _(defaults to sold strike)_\n"
-                f"_Monitoring resumed._"
-            )
+        live_symbols = {p['tradingsymbol'] for p in kite.positions()['net'] if p.get('quantity', 0) != 0}
     except Exception as e:
-        logger.error(f"Position restore failed: {e}")
+        logger.error(f"Could not verify persisted trade against live positions: {e}")
+        return
+
+    symbols_to_check = t["symbol"].split(" + ") if t["action"] == "STRANGLE" else [t["symbol"]]
+    if t.get("hedge_symbol"):
+        symbols_to_check.append(t["hedge_symbol"])
+
+    missing = [s for s in symbols_to_check if s not in live_symbols]
+    if missing:
+        logger.warning(
+            f"Persisted trade {t['action']} {t['strike']} no longer found live "
+            f"(missing: {missing}) — discarding persisted state, starting flat."
+        )
+        _STATE_FILE.unlink(missing_ok=True)
+        _post(
+            f"⚠️ *Persisted trade not found live on restart*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Was tracking *{t['action'].replace('_',' ')} {t['strike']}* — "
+            f"symbols missing from current positions: `{', '.join(missing)}`\n"
+            f"_Treating as already closed. Starting flat — please verify manually._"
+        )
+        return
+
+    monitor.set_trade(TradeState(
+        action                 = t["action"],
+        strike                 = t["strike"],
+        symbol                 = t["symbol"],
+        entry_time             = datetime.strptime(t["entry_time"], "%Y-%m-%d %H:%M:%S"),
+        entry_premium          = t["entry_premium"],
+        entry_spot             = t["entry_spot"],
+        sl_spot_level          = t["sl_spot_level"],
+        expiry                 = t["expiry"],
+        entry_put_wall         = t.get("entry_put_wall"),
+        entry_call_wall        = t.get("entry_call_wall"),
+        entry_resistance       = t.get("entry_resistance"),
+        entry_support          = t.get("entry_support"),
+        lots                   = t.get("lots", 0),
+        hedge_symbol           = t.get("hedge_symbol"),
+        hedge_strike           = t.get("hedge_strike"),
+        hedge_entry_premium    = t.get("hedge_entry_premium"),
+        sl_put                 = t.get("sl_put"),
+        partial_profit_locked  = t.get("partial_profit_locked", False),
+    ))
+
+    sl = state.get("strangle_legs")
+    if sl:
+        strangle_legs = StrangleLegState(
+            ce_strike        = sl["ce_strike"],
+            ce_symbol        = sl["ce_symbol"],
+            ce_entry_premium = sl["ce_entry_premium"],
+            pe_strike        = sl["pe_strike"],
+            pe_symbol        = sl["pe_symbol"],
+            pe_entry_premium = sl["pe_entry_premium"],
+            ce_active        = sl["ce_active"],
+            pe_active        = sl["pe_active"],
+        )
+
+    tr = monitor.trade
+    logger.info(f"Restored {tr.action} {tr.strike}  qty={tr.lots}  hedge={tr.hedge_symbol}")
+    _post(
+        f"♻️ *Position Restored on Restart*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Trade: *{tr.action.replace('_',' ')} {tr.strike}*  qty={tr.lots}\n"
+        f"Avg entry: ₹{tr.entry_premium:.2f}  |  Expiry: {tr.expiry}\n"
+        f"SL spot: {tr.sl_spot_level:.0f}\n"
+        f"_Monitoring resumed from persisted state._"
+    )
 
 
 def _check_total_mtm():
@@ -360,6 +407,7 @@ def _check_total_mtm():
     _total_loss_hit = True
     monitor.clear_trade()
     strangle_legs = None
+    _save_state()
 
     lines = [
         f"🚨 *ALL POSITIONS SQUARED OFF — DAILY LOSS LIMIT*",
@@ -443,6 +491,7 @@ def _close_directional_slice(trade, kite, spot, oc_exit, exit_qty, tag, time_lab
         monitor.trade.lots = remaining_qty
     else:
         monitor.clear_trade()
+    _save_state()
 
 
 def force_exit_all():
@@ -757,6 +806,7 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
                         lots=new_qty,
                     ))
                     _register_strangle(new_signal, spot, oc)
+                    _save_state()
                 else:
                     errors = [r.error for r in (ce_res, pe_res) if not r.success]
                     send_error_alert(f"Strangle re-entry failed: {'; '.join(errors)}")
@@ -787,6 +837,7 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
                         hedge_strike=hedge_strike,
                         hedge_entry_premium=hedge_ltp,
                     ))
+                    _save_state()
                 else:
                     send_error_alert(f"Directional re-entry failed: {sell_res.error}")
                     new_signal = None
@@ -918,6 +969,7 @@ def run_scan():
                             hedge_strike=hedge_strike,
                             hedge_entry_premium=hedge_ltp,
                         ))
+                        _save_state()
                     else:
                         send_error_alert(f"Entry order failed: {sell_res.error}")
 
@@ -939,6 +991,7 @@ def run_scan():
                             lots=qty,
                         ))
                         _register_strangle(final, spot, oc)
+                        _save_state()
                     else:
                         errors = [r.error for r in (ce_res, pe_res) if not r.success]
                         send_error_alert(f"Strangle entry failed: {'; '.join(errors)}")
@@ -949,6 +1002,8 @@ def run_scan():
                 spot_price=spot, expiry=oc.weekly_expiry_date,
             )
             send_signal(final, observation=True)
+
+        _save_state()
 
     except FileNotFoundError as e:
         logger.error(str(e))
