@@ -36,7 +36,7 @@ from typing import Optional
 import schedule
 
 from auth.kite_login import load_access_token
-from execution.order_manager import place_sell_order, place_buy_order, place_spread_entry
+from execution.order_manager import place_sell_order, place_buy_order, place_spread_entry, square_off_position
 from config import (
     MARKET_OPEN_HOUR, MARKET_OPEN_MIN,
     MARKET_CLOSE_HOUR, MARKET_CLOSE_MIN,
@@ -44,7 +44,7 @@ from config import (
     FORCE_EXIT_HOUR, FORCE_EXIT_MIN,
     STRANGLE_CUTOFF_HOUR, STRANGLE_CUTOFF_MIN,
     FRIDAY_STRANGLE_CUTOFF, STRANGLE_SL_BUFFER,
-    NIFTY_LOT_SIZE,
+    NIFTY_LOT_SIZE, TOTAL_MTM_MAX_LOSS,
 )
 from data.market_data import get_kite_client, fetch_nifty_candles, get_current_nifty_price
 from data.option_chain import fetch_option_chain
@@ -158,6 +158,8 @@ _kite_token   = None
 monitor       = TradeMonitor()
 strangle_legs: StrangleLegState | None = None   # tracks individual strangle legs
 _signal_exit_blocked: Optional[str]   = None    # direction blocked for rest of session after SIGNAL_EXIT
+_total_loss_hit: bool = False    # True once the whole-account MTM guard has squared off for the day
+_total_loss_reset_date = None   # last date _total_loss_hit was reset — detects day rollover
 
 
 def _get_kite():
@@ -302,6 +304,77 @@ def _restore_positions_from_kite():
             )
     except Exception as e:
         logger.error(f"Position restore failed: {e}")
+
+
+def _check_total_mtm():
+    """
+    Every scan: sum live P&L across every open position in the account —
+    the algo's own trade included, no distinction made — and square off
+    everything the moment the combined loss exceeds -TOTAL_MTM_MAX_LOSS.
+    Fires once per day.
+    """
+    global _total_loss_hit, _total_loss_reset_date, strangle_legs
+
+    today = datetime.now().date()
+    if _total_loss_reset_date != today:
+        _total_loss_hit        = False
+        _total_loss_reset_date = today
+
+    if _total_loss_hit:
+        return
+
+    try:
+        kite    = _get_kite()
+        all_pos = kite.positions()['net']
+    except Exception as e:
+        logger.warning(f"Total MTM check: positions() failed: {e}")
+        return
+
+    open_positions = [p for p in all_pos if p.get('quantity', 0) != 0]
+    if not open_positions:
+        return
+
+    total_pnl = sum(p.get('pnl', 0) for p in open_positions)
+    logger.info(f"Total account MTM: {_fmt_pnl(total_pnl)}  ({len(open_positions)} position(s))")
+
+    if total_pnl > -TOTAL_MTM_MAX_LOSS:
+        return
+
+    logger.warning(
+        f"Total MTM loss breach: {_fmt_pnl(total_pnl)}  "
+        f"≤  -₹{TOTAL_MTM_MAX_LOSS:,} — squaring off everything"
+    )
+    closed = []
+    for p in open_positions:
+        symbol   = p['tradingsymbol']
+        qty      = p['quantity']
+        exchange = p.get('exchange') or 'NFO'
+        product  = p.get('product') or 'NRML'
+        ltp      = p.get('last_price') or None
+        result = square_off_position(kite, symbol, qty, exchange=exchange, product=product, ltp=ltp)
+        if result.success:
+            closed.append((symbol, abs(qty), p.get('pnl', 0)))
+        else:
+            send_error_alert(f"Square-off failed for {symbol}: {result.error}")
+
+    _total_loss_hit = True
+    monitor.clear_trade()
+    strangle_legs = None
+
+    lines = [
+        f"🚨 *ALL POSITIONS SQUARED OFF — DAILY LOSS LIMIT*",
+        f"━━━━━━━━━━━━━━━━━━━━",
+        f"Combined MTM {_fmt_pnl(total_pnl)} breached -₹{TOTAL_MTM_MAX_LOSS:,} across all open positions.",
+        f"",
+    ]
+    for sym, qty, pnl in closed:
+        lines.append(f"   `{sym}`  qty={qty}   {_fmt_pnl(pnl)}")
+    lines += [
+        f"",
+        f"_No more entries today._",
+        f"━━━━━━━━━━━━━━━━━━━━",
+    ]
+    _post("\n".join(lines))
 
 
 def _close_directional_slice(trade, kite, spot, oc_exit, exit_qty, tag, time_label, remaining_qty=0):
@@ -733,6 +806,12 @@ def run_scan():
 
     try:
         kite = _get_kite()
+
+        try:
+            _check_total_mtm()
+        except Exception as e:
+            logger.exception(f"Total MTM check failed: {e}")
+
         df   = fetch_nifty_candles(kite)
         spot = get_current_nifty_price(kite)
         oc   = fetch_option_chain(kite=kite)
@@ -800,7 +879,7 @@ def run_scan():
                 logger.info(f"Strangle single leg running: {strangle_legs.remaining_leg}")
 
         # ── New entry (no active trade) ───────────────────────────
-        elif _entry_allowed():
+        elif not _total_loss_hit and _entry_allowed():
             final = combine_signals(
                 tl=tl_result, rsi=rsi_result, opt=opt_signal,
                 spot_price=spot, expiry=oc.weekly_expiry_date,
