@@ -100,6 +100,7 @@ def _is_non_directional(
     - RSI in neutral zone (40–60)
     - PCR in neutral zone (0.8–1.2)
     - Both support AND resistance trendlines visible
+    - A tradeable strike was actually found on BOTH sides
     - Enough range between them (≥ 0.5%) to make strangle worthwhile
     """
     if call_score >= MIN_SIGNAL_SCORE or put_score >= MIN_SIGNAL_SCORE:
@@ -108,8 +109,9 @@ def _is_non_directional(
     rsi_neutral = RSI_NEUTRAL_LOW <= rsi.rsi_current <= RSI_NEUTRAL_HIGH
     pcr_neutral = PCR_NEUTRAL_LOW <= opt.pcr <= PCR_NEUTRAL_HIGH
     both_levels = tl.resistance_level is not None and tl.support_level is not None
+    both_strikes_found = opt.call_symbol is not None and opt.put_symbol is not None
 
-    if not (rsi_neutral and pcr_neutral and both_levels):
+    if not (rsi_neutral and pcr_neutral and both_levels and both_strikes_found):
         return False
 
     range_pct = (tl.resistance_level - tl.support_level) / tl.support_level
@@ -203,7 +205,7 @@ def combine_signals(
         put_reasons.append(f"Put writing building at {opt.put_wall} & nearby  |  PCR {opt.pcr}")
 
     # ── CALL SELL (directional) → Bear Call Spread ───────────────
-    if call_score >= MIN_SIGNAL_SCORE and call_score >= put_score:
+    if call_score >= MIN_SIGNAL_SCORE and call_score >= put_score and opt.call_symbol is not None:
         lots = LOTS_STRONG if call_score == 3 else LOTS_MODERATE
         sl   = (tl.resistance_level or spot_price) + SL_BUFFER_POINTS
         net  = round((opt.call_ltp or 0) - (opt.hedge_call_ltp or 0), 2)
@@ -222,7 +224,7 @@ def combine_signals(
         )
 
     # ── PUT SELL (directional) → Bull Put Spread ──────────────────
-    if put_score >= MIN_SIGNAL_SCORE:
+    if put_score >= MIN_SIGNAL_SCORE and opt.put_symbol is not None:
         lots = LOTS_STRONG if put_score == 3 else LOTS_MODERATE
         sl   = (tl.support_level or spot_price) - SL_BUFFER_POINTS
         net  = round((opt.put_ltp or 0) - (opt.hedge_put_ltp or 0), 2)
