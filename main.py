@@ -242,6 +242,12 @@ def _save_state():
                 "pe_entry_premium": sl.pe_entry_premium,
                 "ce_active":        sl.ce_active,
                 "pe_active":        sl.pe_active,
+                "hedge_ce_strike":        sl.hedge_ce_strike,
+                "hedge_ce_symbol":        sl.hedge_ce_symbol,
+                "hedge_ce_entry_premium": sl.hedge_ce_entry_premium,
+                "hedge_pe_strike":        sl.hedge_pe_strike,
+                "hedge_pe_symbol":        sl.hedge_pe_symbol,
+                "hedge_pe_entry_premium": sl.hedge_pe_entry_premium,
             }
 
     try:
@@ -290,6 +296,9 @@ def _restore_positions_from_kite():
     symbols_to_check = t["symbol"].split(" + ") if t["action"] == "STRANGLE" else [t["symbol"]]
     if t.get("hedge_symbol"):
         symbols_to_check.append(t["hedge_symbol"])
+    sl_check = state.get("strangle_legs")
+    if sl_check:
+        symbols_to_check += [s for s in (sl_check.get("hedge_ce_symbol"), sl_check.get("hedge_pe_symbol")) if s]
 
     missing = [s for s in symbols_to_check if s not in live_symbols]
     if missing:
@@ -339,6 +348,12 @@ def _restore_positions_from_kite():
             pe_entry_premium = sl["pe_entry_premium"],
             ce_active        = sl["ce_active"],
             pe_active        = sl["pe_active"],
+            hedge_ce_strike        = sl.get("hedge_ce_strike"),
+            hedge_ce_symbol        = sl.get("hedge_ce_symbol"),
+            hedge_ce_entry_premium = sl.get("hedge_ce_entry_premium"),
+            hedge_pe_strike        = sl.get("hedge_pe_strike"),
+            hedge_pe_symbol        = sl.get("hedge_pe_symbol"),
+            hedge_pe_entry_premium = sl.get("hedge_pe_entry_premium"),
         )
 
     tr = monitor.trade
@@ -579,7 +594,71 @@ def _register_strangle(signal, spot, oc):
         pe_strike=signal.put_strike,
         pe_symbol=signal.put_symbol,
         pe_entry_premium=signal.put_premium or 0,
+        hedge_ce_strike=signal.hedge_call_strike,
+        hedge_ce_symbol=signal.hedge_call_symbol,
+        hedge_ce_entry_premium=signal.hedge_call_ltp,
+        hedge_pe_strike=signal.hedge_put_strike,
+        hedge_pe_symbol=signal.hedge_put_symbol,
+        hedge_pe_entry_premium=signal.hedge_put_ltp,
     )
+
+
+def _enter_strangle(kite, signal, qty: int, spot: float, oc) -> bool:
+    """
+    Enter both strangle legs, buying each side's far-OTM margin hedge first
+    when the signal found one (falls back to a naked sell for that side
+    otherwise, same as the directional entry path). If one side enters but
+    the other fails, unwinds whichever side succeeded rather than leaving a
+    naked single-sided position no one asked for.
+    Returns True and sets monitor.trade/strangle_legs on success.
+    """
+    if signal.hedge_call_symbol:
+        hedge_ce_res, ce_res = place_spread_entry(
+            kite, signal.call_symbol, signal.hedge_call_symbol, qty,
+            sell_price=signal.call_premium, hedge_price=signal.hedge_call_ltp,
+        )
+    else:
+        hedge_ce_res, ce_res = None, place_sell_order(kite, signal.call_symbol, qty, price=signal.call_premium)
+
+    if signal.hedge_put_symbol:
+        hedge_pe_res, pe_res = place_spread_entry(
+            kite, signal.put_symbol, signal.hedge_put_symbol, qty,
+            sell_price=signal.put_premium, hedge_price=signal.hedge_put_ltp,
+        )
+    else:
+        hedge_pe_res, pe_res = None, place_sell_order(kite, signal.put_symbol, qty, price=signal.put_premium)
+
+    if ce_res.success and pe_res.success:
+        monitor.set_trade(TradeState(
+            action="STRANGLE",
+            strike=signal.call_strike,
+            symbol=f"{signal.call_symbol} + {signal.put_symbol}",
+            entry_time=datetime.now(),
+            entry_premium=(signal.call_premium or 0) + (signal.put_premium or 0),
+            entry_spot=spot,
+            sl_spot_level=signal.call_sl or spot,
+            sl_put=signal.put_sl,
+            expiry=signal.expiry,
+            lots=qty,
+        ))
+        _register_strangle(signal, spot, oc)
+        _save_state()
+        return True
+
+    # One side succeeded, the other failed — unwind the successful side
+    # rather than leaving a naked single-sided position.
+    if ce_res.success:
+        place_buy_order(kite, signal.call_symbol, qty, price=signal.call_premium)
+        if hedge_ce_res and hedge_ce_res.success:
+            place_sell_order(kite, signal.hedge_call_symbol, qty, price=signal.hedge_call_ltp)
+    if pe_res.success:
+        place_buy_order(kite, signal.put_symbol, qty, price=signal.put_premium)
+        if hedge_pe_res and hedge_pe_res.success:
+            place_sell_order(kite, signal.hedge_put_symbol, qty, price=signal.hedge_put_ltp)
+
+    errors = [r.error for r in (ce_res, pe_res) if not r.success]
+    send_error_alert(f"Strangle entry failed: {'; '.join(errors)}")
+    return False
 
 
 def _check_sl_hit(kite, trade: TradeState, spot: float, oc=None) -> bool:
@@ -612,9 +691,15 @@ def _check_sl_hit(kite, trade: TradeState, spot: float, oc=None) -> bool:
                 if strangle_legs.ce_active:
                     ep = _buy_price(oc, "CE", strangle_legs.ce_strike) if oc else None
                     place_buy_order(kite, strangle_legs.ce_symbol, trade.lots, price=ep)
+                    if strangle_legs.hedge_ce_symbol:
+                        hp = _sell_price(oc, "CE", strangle_legs.hedge_ce_strike) if oc else None
+                        place_sell_order(kite, strangle_legs.hedge_ce_symbol, trade.lots, price=hp)
                 if strangle_legs.pe_active:
                     ep = _buy_price(oc, "PE", strangle_legs.pe_strike) if oc else None
                     place_buy_order(kite, strangle_legs.pe_symbol, trade.lots, price=ep)
+                    if strangle_legs.hedge_pe_symbol:
+                        hp = _sell_price(oc, "PE", strangle_legs.hedge_pe_strike) if oc else None
+                        place_sell_order(kite, strangle_legs.hedge_pe_symbol, trade.lots, price=hp)
             else:
                 if oc:
                     sd = (oc.call_data if opt_type == "CE" else oc.put_data).get(trade.strike)
@@ -696,6 +781,11 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
             r = place_buy_order(kite, strangle_legs.ce_symbol, qty, price=ep)
             if not r.success:
                 send_error_alert(f"CE leg exit failed: {r.error}")
+            if strangle_legs.hedge_ce_symbol:
+                hp = _sell_price(oc, "CE", strangle_legs.hedge_ce_strike)
+                hr = place_sell_order(kite, strangle_legs.hedge_ce_symbol, qty, price=hp)
+                if not hr.success:
+                    send_error_alert(f"CE hedge unwind failed: {hr.error}")
         strangle_legs.ce_active = False
         logger.info(f"CE leg {strangle_legs.ce_strike} closed. PE {strangle_legs.pe_strike} running.")
 
@@ -705,6 +795,11 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
             r = place_buy_order(kite, strangle_legs.pe_symbol, qty, price=ep)
             if not r.success:
                 send_error_alert(f"PE leg exit failed: {r.error}")
+            if strangle_legs.hedge_pe_symbol:
+                hp = _sell_price(oc, "PE", strangle_legs.hedge_pe_strike)
+                hr = place_sell_order(kite, strangle_legs.hedge_pe_symbol, qty, price=hp)
+                if not hr.success:
+                    send_error_alert(f"PE hedge unwind failed: {hr.error}")
         strangle_legs.pe_active = False
         logger.info(f"PE leg {strangle_legs.pe_strike} closed. CE {strangle_legs.ce_strike} running.")
 
@@ -744,9 +839,15 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
                 if strangle_legs.ce_active:
                     r = place_buy_order(kite, strangle_legs.ce_symbol, qty, price=_buy_price(oc, "CE", strangle_legs.ce_strike))
                     if not r.success: send_error_alert(f"CE exit failed: {r.error}")
+                    if strangle_legs.hedge_ce_symbol:
+                        hr = place_sell_order(kite, strangle_legs.hedge_ce_symbol, qty, price=_sell_price(oc, "CE", strangle_legs.hedge_ce_strike))
+                        if not hr.success: send_error_alert(f"CE hedge unwind failed: {hr.error}")
                 if strangle_legs.pe_active:
                     r = place_buy_order(kite, strangle_legs.pe_symbol, qty, price=_buy_price(oc, "PE", strangle_legs.pe_strike))
                     if not r.success: send_error_alert(f"PE exit failed: {r.error}")
+                    if strangle_legs.hedge_pe_symbol:
+                        hr = place_sell_order(kite, strangle_legs.hedge_pe_symbol, qty, price=_sell_price(oc, "PE", strangle_legs.hedge_pe_strike))
+                        if not hr.success: send_error_alert(f"PE hedge unwind failed: {hr.error}")
             else:
                 sd = (oc.call_data if opt_type == "CE" else oc.put_data).get(trade.strike)
                 exit_ltp = sd.ltp if sd and sd.ltp > 0 else None
@@ -776,9 +877,15 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
                 if strangle_legs.ce_active:
                     r = place_buy_order(kite, strangle_legs.ce_symbol, qty, price=_buy_price(oc, "CE", strangle_legs.ce_strike))
                     if not r.success: send_error_alert(f"CE exit failed: {r.error}")
+                    if strangle_legs.hedge_ce_symbol:
+                        hr = place_sell_order(kite, strangle_legs.hedge_ce_symbol, qty, price=_sell_price(oc, "CE", strangle_legs.hedge_ce_strike))
+                        if not hr.success: send_error_alert(f"CE hedge unwind failed: {hr.error}")
                 if strangle_legs.pe_active:
                     r = place_buy_order(kite, strangle_legs.pe_symbol, qty, price=_buy_price(oc, "PE", strangle_legs.pe_strike))
                     if not r.success: send_error_alert(f"PE exit failed: {r.error}")
+                    if strangle_legs.hedge_pe_symbol:
+                        hr = place_sell_order(kite, strangle_legs.hedge_pe_symbol, qty, price=_sell_price(oc, "PE", strangle_legs.hedge_pe_strike))
+                        if not hr.success: send_error_alert(f"PE hedge unwind failed: {hr.error}")
             else:
                 r = place_buy_order(kite, trade.symbol, qty, price=_buy_price(oc, opt_type, trade.strike))
                 if not r.success: send_error_alert(f"Exit order failed: {r.error}")
@@ -790,26 +897,7 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
         if new_signal and new_signal.action != "NO_SIGNAL":
             if new_signal.action == "STRANGLE" and _strangle_entry_allowed():
                 new_qty = new_signal.strangle_lots * NIFTY_LOT_SIZE
-                ce_res  = place_sell_order(kite, new_signal.call_symbol, new_qty, price=new_signal.call_premium)
-                pe_res  = place_sell_order(kite, new_signal.put_symbol,  new_qty, price=new_signal.put_premium)
-                if ce_res.success and pe_res.success:
-                    monitor.set_trade(TradeState(
-                        action="STRANGLE",
-                        strike=new_signal.call_strike,
-                        symbol=f"{new_signal.call_symbol} + {new_signal.put_symbol}",
-                        entry_time=datetime.now(),
-                        entry_premium=(new_signal.call_premium or 0) + (new_signal.put_premium or 0),
-                        entry_spot=spot,
-                        sl_spot_level=new_signal.call_sl or spot,
-                        sl_put=new_signal.put_sl,
-                        expiry=new_signal.expiry,
-                        lots=new_qty,
-                    ))
-                    _register_strangle(new_signal, spot, oc)
-                    _save_state()
-                else:
-                    errors = [r.error for r in (ce_res, pe_res) if not r.success]
-                    send_error_alert(f"Strangle re-entry failed: {'; '.join(errors)}")
+                if not _enter_strangle(kite, new_signal, new_qty, spot, oc):
                     new_signal = None
             elif new_signal.action in ("CALL_SELL", "PUT_SELL") and _entry_allowed():
                 new_qty   = new_signal.lots * NIFTY_LOT_SIZE
@@ -974,27 +1062,8 @@ def run_scan():
                         send_error_alert(f"Entry order failed: {sell_res.error}")
 
                 elif final.action == "STRANGLE" and _strangle_entry_allowed():
-                    qty    = final.strangle_lots * NIFTY_LOT_SIZE
-                    ce_res = place_sell_order(kite, final.call_symbol, qty, price=final.call_premium)
-                    pe_res = place_sell_order(kite, final.put_symbol,  qty, price=final.put_premium)
-                    if ce_res.success and pe_res.success:
-                        monitor.set_trade(TradeState(
-                            action="STRANGLE",
-                            strike=final.call_strike,
-                            symbol=f"{final.call_symbol} + {final.put_symbol}",
-                            entry_time=datetime.now(),
-                            entry_premium=(final.call_premium or 0) + (final.put_premium or 0),
-                            entry_spot=spot,
-                            sl_spot_level=final.call_sl or spot,
-                            sl_put=final.put_sl,
-                            expiry=final.expiry,
-                            lots=qty,
-                        ))
-                        _register_strangle(final, spot, oc)
-                        _save_state()
-                    else:
-                        errors = [r.error for r in (ce_res, pe_res) if not r.success]
-                        send_error_alert(f"Strangle entry failed: {'; '.join(errors)}")
+                    qty = final.strangle_lots * NIFTY_LOT_SIZE
+                    _enter_strangle(kite, final, qty, spot, oc)
         else:
             # Outside entry window (before 10:00 or after force-exit): observe only
             final = combine_signals(

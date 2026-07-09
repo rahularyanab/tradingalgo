@@ -48,6 +48,13 @@ class StrangleLegState:
     pe_entry_premium: float
     ce_active:        bool = True
     pe_active:        bool = True
+    # Far-OTM margin hedges, one per side (bought alongside the sold leg)
+    hedge_ce_strike:        Optional[int]   = None
+    hedge_ce_symbol:        Optional[str]   = None
+    hedge_ce_entry_premium: Optional[float] = None
+    hedge_pe_strike:        Optional[int]   = None
+    hedge_pe_symbol:        Optional[str]   = None
+    hedge_pe_entry_premium: Optional[float] = None
 
     @property
     def is_fully_closed(self):
