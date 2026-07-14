@@ -47,6 +47,7 @@ from config import (
     FRIDAY_STRANGLE_CUTOFF, STRANGLE_SL_BUFFER,
     NIFTY_LOT_SIZE, TOTAL_MTM_MAX_LOSS,
 )
+from execution.mtm_guard import is_paused as _mtm_guard_is_paused
 from data.market_data import get_kite_client, fetch_nifty_candles, get_current_nifty_price
 from data.option_chain import fetch_option_chain
 from notifications.telegram_bot import (
@@ -76,7 +77,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("main")
 
-JOURNAL_PATH = Path("logs/trade_journal.csv")
+from execution.pnl_report import JOURNAL_PATH
+
 JOURNAL_FIELDS = [
     "date", "exit_time", "action", "strike", "expiry",
     "entry_time", "entry_spot", "exit_spot",
@@ -381,6 +383,10 @@ def _check_total_mtm():
     if _total_loss_reset_date != today:
         _total_loss_hit        = False
         _total_loss_reset_date = today
+
+    if _mtm_guard_is_paused(today.isoformat()):
+        logger.warning(f"Total MTM guard paused for {today.isoformat()} — skipping check.")
+        return
 
     if _total_loss_hit:
         return

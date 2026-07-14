@@ -97,3 +97,5 @@ PARTIAL_PROFIT_LOCK_PNL  = 5000  # ₹ unrealised threshold → exit all-but-1-l
 
 # ── Whole-account MTM guard (every open position, algo's own trade included) ──
 TOTAL_MTM_MAX_LOSS = 20000  # ₹ combined loss across ALL open positions → square off everything
+# Pause dates are no longer stored here — see execution/mtm_guard.py (JSON-backed,
+# controllable via the Telegram /pausemtm and /resumemtm commands).
