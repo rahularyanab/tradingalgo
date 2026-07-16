@@ -161,6 +161,7 @@ _kite_token   = None
 monitor       = TradeMonitor()
 strangle_legs: StrangleLegState | None = None   # tracks individual strangle legs
 _signal_exit_blocked: Optional[str]   = None    # direction blocked for rest of session after SIGNAL_EXIT
+_signal_exit_reset_date = None   # last date _signal_exit_blocked was reset — detects day rollover
 _total_loss_hit: bool = False    # True once the whole-account MTM guard has squared off for the day
 _total_loss_reset_date = None   # last date _total_loss_hit was reset — detects day rollover
 
@@ -1058,10 +1059,15 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
 
 
 def run_scan():
-    global strangle_legs
+    global strangle_legs, _signal_exit_blocked, _signal_exit_reset_date
     if not _is_market_open():
         logger.info("Market closed — skipping.")
         return
+
+    today = datetime.now().date()
+    if _signal_exit_reset_date != today:
+        _signal_exit_blocked   = None
+        _signal_exit_reset_date = today
 
     logger.info("═" * 55)
     logger.info(f"Scan @ {datetime.now().strftime('%H:%M:%S')}")
