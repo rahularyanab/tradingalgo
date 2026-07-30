@@ -2,12 +2,15 @@
 Combines the three signal modules into a final trading decision.
 
 Directional:
-  Score 3/3 → STRONG  → 3 lots
-  Score 2/3 → MODERATE → 2 lots
-  Score 1/3 → WEAK    → suppressed
+  Score 3/3 (STRONG)              → always trades directionally
+  Score 2/3 (MODERATE), other = 0 → trades directionally (no real contest)
+  Score 2/3 vs opposing ≥1, or a 2-2 tie → contested: prefer STRANGLE when
+                                            market conditions allow it, else
+                                            fall back to the higher score
 
 Non-directional (Strangle):
-  PCR neutral + RSI neutral + both S/R visible + no strong directional bias
+  RSI neutral + PCR neutral + both S/R visible + tradeable strikes on both
+  sides + ≥0.5% range between them
   → STRANGLE: sell CALL at resistance + PUT at support, 2 lots each leg
 """
 
@@ -87,25 +90,21 @@ class FinalSignal:
     support_level:        Optional[float] = None
 
 
-def _is_non_directional(
+def _strangle_conditions_met(
     tl: TrendlineResult,
     rsi: RSIResult,
     opt: OptionSignal,
-    call_score: int,
-    put_score: int,
 ) -> bool:
     """
-    Non-directional when:
-    - Neither call nor put score reaches threshold
+    Market conditions suitable for a strangle — independent of directional
+    scores, since the caller decides *when* to prefer strangle over a
+    directional trade:
     - RSI in neutral zone (40–60)
     - PCR in neutral zone (0.8–1.2)
     - Both support AND resistance trendlines visible
     - A tradeable strike was actually found on BOTH sides
     - Enough range between them (≥ 0.5%) to make strangle worthwhile
     """
-    if call_score >= MIN_SIGNAL_SCORE or put_score >= MIN_SIGNAL_SCORE:
-        return False
-
     rsi_neutral = RSI_NEUTRAL_LOW <= rsi.rsi_current <= RSI_NEUTRAL_HIGH
     pcr_neutral = PCR_NEUTRAL_LOW <= opt.pcr <= PCR_NEUTRAL_HIGH
     both_levels = tl.resistance_level is not None and tl.support_level is not None
@@ -204,8 +203,7 @@ def combine_signals(
         put_score += 1
         put_reasons.append(f"Put writing building at {opt.put_wall} & nearby  |  PCR {opt.pcr}")
 
-    # ── CALL SELL (directional) → Bear Call Spread ───────────────
-    if call_score >= MIN_SIGNAL_SCORE and call_score >= put_score and opt.call_symbol is not None:
+    def _call_sell() -> FinalSignal:
         lots = LOTS_STRONG if call_score == 3 else LOTS_MODERATE
         sl   = (tl.resistance_level or spot_price) + SL_BUFFER_POINTS
         net  = round((opt.call_ltp or 0) - (opt.hedge_call_ltp or 0), 2)
@@ -223,8 +221,7 @@ def combine_signals(
             **_hedge, **_common, **_flags,
         )
 
-    # ── PUT SELL (directional) → Bull Put Spread ──────────────────
-    if put_score >= MIN_SIGNAL_SCORE and opt.put_symbol is not None:
+    def _put_sell() -> FinalSignal:
         lots = LOTS_STRONG if put_score == 3 else LOTS_MODERATE
         sl   = (tl.support_level or spot_price) - SL_BUFFER_POINTS
         net  = round((opt.put_ltp or 0) - (opt.hedge_put_ltp or 0), 2)
@@ -242,8 +239,7 @@ def combine_signals(
             **_hedge, **_common, **_flags,
         )
 
-    # ── STRANGLE (non-directional) ────────────────────────────────
-    if _is_non_directional(tl, rsi, opt, call_score, put_score):
+    def _strangle() -> FinalSignal:
         call_sl = (tl.resistance_level or spot_price) + SL_BUFFER_POINTS
         put_sl  = (tl.support_level  or spot_price) - SL_BUFFER_POINTS
         reasons = [
@@ -275,6 +271,32 @@ def combine_signals(
             reasons=reasons,
             **_hedge, **_common, **_flags,
         )
+
+    strangle_ok = _strangle_conditions_met(tl, rsi, opt)
+
+    # ── STRONG (3/3) is decisive on its own — no contest, trade it directly ──
+    if call_score == 3 and call_score >= put_score and opt.call_symbol is not None:
+        return _call_sell()
+    if put_score == 3 and opt.put_symbol is not None:
+        return _put_sell()
+
+    # ── MODERATE (2/3) with the other side truly silent (0) — no real contest ──
+    if call_score == 2 and put_score == 0 and opt.call_symbol is not None:
+        return _call_sell()
+    if put_score == 2 and call_score == 0 and opt.put_symbol is not None:
+        return _put_sell()
+
+    # ── Contested (2 vs ≥1, incl. 2-2 ties) or genuinely neutral (<2 both sides) ──
+    # The market itself is undecided here — a strangle is safer than picking a side.
+    if strangle_ok:
+        return _strangle()
+
+    # ── Strangle not tradeable (bad RSI/PCR zone, no levels, etc.) — fall back
+    # to whichever directional score clears the bar, contested or not.
+    if call_score >= MIN_SIGNAL_SCORE and call_score >= put_score and opt.call_symbol is not None:
+        return _call_sell()
+    if put_score >= MIN_SIGNAL_SCORE and opt.put_symbol is not None:
+        return _put_sell()
 
     # ── No signal ─────────────────────────────────────────────────
     return FinalSignal(

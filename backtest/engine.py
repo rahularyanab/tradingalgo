@@ -29,7 +29,6 @@ from config import (
     PIVOT_LOOKBACK,
     STRANGLE_CUTOFF_HOUR, STRANGLE_CUTOFF_MIN,
     FRIDAY_STRANGLE_CUTOFF, STRANGLE_SL_BUFFER,
-    TRENDLINE_PIVOTS,
     PROXIMITY_PCT,
     RSI_PERIOD,
     LOTS_STRONG, LOTS_MODERATE, LOTS_STRANGLE,
@@ -90,6 +89,17 @@ class BacktestTrade:
     pe_active:       bool  = True    # strangle: is PE leg still open?
     ce_closed_pnl:   float = 0.0    # P&L realised when CE leg closed early
     pe_closed_pnl:   float = 0.0    # P&L realised when PE leg closed early
+    # evaluate_position() (signals/position_manager.py) reads these on every
+    # CALL_SELL/PUT_SELL trade — must exist even though backtest never passes
+    # current_ltp, so the profit-lock checks stay dormant (no simulated LTP
+    # feed) rather than crashing with AttributeError.
+    partial_profit_locked: bool  = False
+    peak_unrealised:       float = 0.0
+    entry_lots:            int   = 0
+
+    def __post_init__(self):
+        if self.entry_lots == 0:
+            self.entry_lots = self.lots
 
 
 EXPIRY_WEEKDAY = 1   # Tuesday (0=Mon,1=Tue,2=Wed,3=Thu,4=Fri)

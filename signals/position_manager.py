@@ -24,7 +24,8 @@ from typing import Optional
 from config import (PCR_BULLISH, PCR_BEARISH, MIN_SIGNAL_SCORE,
                     ROLL_THRESHOLD_PTS, MAX_ROLLS_PER_DAY,
                     BREAKOUT_CONFIRM_CANDLES, REVERSAL_CONFIRM_CANDLES, CLEAN_CONFIRM_CANDLES,
-                    PARTIAL_PROFIT_LOCK_PNL, NIFTY_LOT_SIZE, TARGET_DECAY_PCT)
+                    PARTIAL_PROFIT_LOCK_PNL, NIFTY_LOT_SIZE, TARGET_DECAY_PCT,
+                    PROFIT_LOCK_ARM_PNL, PROFIT_LOCK_GIVEBACK_PCT)
 from strategy.trendline import TrendlineResult
 from strategy.rsi_divergence import RSIResult
 from strategy.option_signal import OptionSignal
@@ -236,6 +237,37 @@ def evaluate_position(
                 )
 
         return ManagementDecision(action=HOLD, reason="Strangle — no actionable signal change.", score=0)
+
+    # ── Track peak unrealised profit (at entry lot size) ───────────
+    # Tracked at entry_lots rather than the possibly-reduced trade.lots, so a
+    # later partial-lock resize doesn't distort the high-water mark.
+    if trade.action in ("CALL_SELL", "PUT_SELL") and current_ltp is not None:
+        tracked_unrealised = (trade.entry_premium - current_ltp) * trade.entry_lots
+        if tracked_unrealised > trade.peak_unrealised:
+            trade.peak_unrealised = tracked_unrealised
+
+    # ── Trailing profit lock — protect gains once they've meaningfully retraced ──
+    # Arms once unrealised has ever reached PROFIT_LOCK_ARM_PNL; once armed, a
+    # retrace of PROFIT_LOCK_GIVEBACK_PCT from that peak exits immediately. This
+    # catches a trade that was comfortably in profit but never crossed the flat
+    # PARTIAL_PROFIT_LOCK_PNL threshold below, then round-tripped into a loss.
+    if (
+        trade.action in ("CALL_SELL", "PUT_SELL")
+        and current_ltp is not None
+        and trade.peak_unrealised >= PROFIT_LOCK_ARM_PNL
+    ):
+        current_unrealised = (trade.entry_premium - current_ltp) * trade.entry_lots
+        giveback_floor = trade.peak_unrealised * (1 - PROFIT_LOCK_GIVEBACK_PCT)
+        if current_unrealised <= giveback_floor:
+            return ManagementDecision(
+                action=EXIT_FULL,
+                reason=(
+                    f"Trailing profit lock: unrealised ₹{current_unrealised:,.0f} retraced from peak "
+                    f"₹{trade.peak_unrealised:,.0f} (floor ₹{giveback_floor:,.0f}, "
+                    f"{int(PROFIT_LOCK_GIVEBACK_PCT*100)}% giveback) — exiting to protect gains"
+                ),
+                score=0,
+            )
 
     # ── Partial profit lock (CALL SELL / PUT SELL only) ─────────
     # When unrealised P&L ≥ threshold and we have more than 1 lot, exit all-but-1.

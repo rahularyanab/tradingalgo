@@ -44,6 +44,13 @@ class TradeState:
     hedge_entry_premium:   Optional[float] = None   # price paid for hedge at entry (for P&L)
     sl_put:                Optional[float] = None   # strangle put-leg SL (sl_spot_level = call-leg SL)
     partial_profit_locked: bool            = False  # True after partial exit fires (prevents re-trigger)
+    peak_unrealised:       float           = 0.0    # highest unrealised profit (₹, at entry_lots) seen so far
+    entry_lots:            int             = 0      # lot-size snapshot at trade open — keeps the peak
+                                                      # calc valid even after a partial-lock resize
+
+    def __post_init__(self):
+        if self.entry_lots == 0:
+            self.entry_lots = self.lots
 
 
 @dataclass

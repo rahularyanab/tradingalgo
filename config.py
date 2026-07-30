@@ -94,6 +94,8 @@ REVERSAL_CONFIRM_CANDLES = 2     # consecutive reversal candles before adding he
 CLEAN_CONFIRM_CANDLES    = 2     # consecutive clean candles before removing hedge
 DAILY_MAX_LOSS           = 5000  # ₹ daily circuit breaker (realised + unrealised)
 PARTIAL_PROFIT_LOCK_PNL  = 5000  # ₹ unrealised threshold → exit all-but-1-lot to lock profit
+PROFIT_LOCK_ARM_PNL      = 1500  # ₹ unrealised (at entry lot size) to arm the trailing lock
+PROFIT_LOCK_GIVEBACK_PCT = 0.35  # exit if unrealised retraces this fraction from its peak once armed
 
 # ── Whole-account MTM guard (every open position, algo's own trade included) ──
 TOTAL_MTM_MAX_LOSS = 20000  # ₹ combined loss across ALL open positions → square off everything

@@ -290,15 +290,31 @@ def analyse_option_signal(
     best_call, call_ltp = _select_call_strike(oc, trendline_resistance)
     best_put,  put_ltp  = _select_put_strike(oc, trendline_support)
 
-    call_symbol = _build_nfo_symbol(best_call, "CE", oc.weekly_expiry_date) if best_call else None
-    put_symbol  = _build_nfo_symbol(best_put,  "PE", oc.weekly_expiry_date) if best_put  else None
+    # Prefer the real Kite tradingsymbol (set when oc came from the Kite-instruments
+    # fallback) over the guessed weekly-format symbol — the guess is wrong whenever
+    # the target expiry is actually the month's last Tuesday (monthly contract,
+    # symbol format "NIFTY{YY}{MON}{STRIKE}{TYPE}" instead of "NIFTY{YY}{M}{DD}...").
+    call_symbol = (
+        (oc.call_data[best_call].symbol if best_call in oc.call_data else None)
+        or (_build_nfo_symbol(best_call, "CE", oc.weekly_expiry_date) if best_call else None)
+    )
+    put_symbol = (
+        (oc.put_data[best_put].symbol if best_put in oc.put_data else None)
+        or (_build_nfo_symbol(best_put, "PE", oc.weekly_expiry_date) if best_put else None)
+    )
 
     # ── Hedge legs (far OTM buy ~₹5-6 for margin reduction) ──────
     hedge_call = find_hedge_strike(oc, "CE", best_call) if best_call else None
     hedge_put  = find_hedge_strike(oc, "PE", best_put)  if best_put  else None
 
-    hedge_call_symbol = _build_nfo_symbol(hedge_call.strike, "CE", oc.weekly_expiry_date) if hedge_call else None
-    hedge_put_symbol  = _build_nfo_symbol(hedge_put.strike,  "PE", oc.weekly_expiry_date) if hedge_put  else None
+    hedge_call_symbol = (
+        (hedge_call.symbol if hedge_call else None)
+        or (_build_nfo_symbol(hedge_call.strike, "CE", oc.weekly_expiry_date) if hedge_call else None)
+    )
+    hedge_put_symbol = (
+        (hedge_put.symbol if hedge_put else None)
+        or (_build_nfo_symbol(hedge_put.strike, "PE", oc.weekly_expiry_date) if hedge_put else None)
+    )
 
     logger.info(
         f"Option signal: pcr={oc.pcr} change_pcr={oc.change_pcr} "

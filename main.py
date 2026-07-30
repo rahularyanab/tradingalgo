@@ -233,6 +233,8 @@ def _save_state():
             "hedge_entry_premium":   trade.hedge_entry_premium,
             "sl_put":                trade.sl_put,
             "partial_profit_locked": trade.partial_profit_locked,
+            "peak_unrealised":       trade.peak_unrealised,
+            "entry_lots":            trade.entry_lots,
         }
         if trade.action == "STRANGLE" and strangle_legs:
             sl = strangle_legs
@@ -338,6 +340,8 @@ def _restore_positions_from_kite():
         hedge_entry_premium    = t.get("hedge_entry_premium"),
         sl_put                 = t.get("sl_put"),
         partial_profit_locked  = t.get("partial_profit_locked", False),
+        peak_unrealised        = t.get("peak_unrealised", 0.0),
+        entry_lots             = t.get("entry_lots", t.get("lots", 0)),
     ))
 
     sl = state.get("strangle_legs")
@@ -914,6 +918,8 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
                     f"━━━━━━━━━━━━━━━━━━━━"
                 )
                 logger.info(f"Partial lock done: {lock_qty} exited @ {exit_ltp}, {NIFTY_LOT_SIZE} remaining")
+                journal_trade = replace(trade, lots=lock_qty)
+                _record_trade_exit(journal_trade, exit_ltp, None, locked_pnl, 0.0, locked_pnl, spot, "PARTIAL_PROFIT_LOCK")
         return   # skip send_management_alert at the bottom
 
     elif decision.action == EXIT_FULL:

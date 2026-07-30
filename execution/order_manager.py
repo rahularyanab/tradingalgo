@@ -122,6 +122,15 @@ def square_off_position(
     return OrderResult(True, None, "quantity is zero — nothing to close", symbol, "NONE", 0, product)
 
 
+def _fresh_ltp(kite, symbol: str) -> Optional[float]:
+    try:
+        key = f"{kite.EXCHANGE_NFO}:{symbol}"
+        return float(kite.quote([key])[key]["last_price"])
+    except Exception as e:
+        logger.warning(f"Could not fetch fresh LTP for {symbol}: {e}")
+        return None
+
+
 def place_spread_entry(
     kite,
     sell_symbol:  str,
@@ -133,6 +142,9 @@ def place_spread_entry(
 ) -> tuple[OrderResult, OrderResult]:
     """
     Enter a spread: BUY hedge first (margin benefit), then SELL main strike.
+    If the main SELL fails after the hedge BUY has already filled, immediately
+    sell the hedge back — don't leave a naked long leg for the broker's RMS
+    to clean up on its own schedule.
     Returns (hedge_buy_result, main_sell_result).
     """
     logger.info(f"Spread entry: BUY {hedge_symbol}@{hedge_price} then SELL {sell_symbol}@{sell_price}  qty={quantity}")
@@ -140,7 +152,22 @@ def place_spread_entry(
     if not hedge_result.success:
         logger.error("Hedge buy failed — aborting spread entry")
         return hedge_result, OrderResult(False, None, "Hedge buy failed", sell_symbol, "SELL", quantity, product)
+
     main_result = place_sell_order(kite, sell_symbol, quantity, product, price=sell_price)
+    if not main_result.success:
+        logger.error(f"Main sell failed after hedge buy filled — unwinding hedge {hedge_symbol} to avoid naked exposure")
+        unwind_price  = _fresh_ltp(kite, hedge_symbol) or hedge_price
+        unwind_result = place_sell_order(kite, hedge_symbol, quantity, product, price=unwind_price)
+        if unwind_result.success:
+            logger.info(f"Hedge unwound: SOLD {hedge_symbol}  qty={quantity}")
+            main_result.error = f"{main_result.error} | hedge unwound OK (sold {hedge_symbol} @ {unwind_price})"
+        else:
+            logger.error(f"HEDGE UNWIND FAILED — naked position remains: {hedge_symbol}  qty={quantity}  error={unwind_result.error}")
+            main_result.error = (
+                f"{main_result.error} | HEDGE UNWIND FAILED — naked {hedge_symbol} "
+                f"qty={quantity} still open, manual action required: {unwind_result.error}"
+            )
+
     return hedge_result, main_result
 
 

@@ -861,6 +861,7 @@ def send_trade_journal_entry(
         "MANAGEMENT_EXIT":"Position management exit",
         "STRANGLE_TARGET":     "Target hit — 65% premium decay",
         "STRANGLE_SIGNAL_EXIT":"Signal-based full exit",
+        "PARTIAL_PROFIT_LOCK": "Partial profit lock",
     }
 
     entry_spot_s = f"{trade.entry_spot:.0f}" if trade.entry_spot > 0 else "—"

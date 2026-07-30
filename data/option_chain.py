@@ -42,6 +42,10 @@ class StrikeData:
     ltp:            float
     iv:             float
     volume:         int
+    # Real Kite tradingsymbol (e.g. "NIFTY26JUL25050CE"), only known when this
+    # StrikeData came from the Kite-instruments fallback. None on the NSE path,
+    # where the caller must fall back to guessing the symbol from the expiry date.
+    symbol:         Optional[str] = None
 
 
 @dataclass
@@ -339,6 +343,7 @@ def _fetch_option_chain_from_kite(kite) -> Optional[OptionChainData]:
                     ltp           = q.get("last_price", 0),
                     iv            = 0,
                     volume        = q.get("volume", 0),
+                    symbol        = sym.split(":", 1)[1],  # strip "NFO:" prefix
                 )
 
         _oi_snapshot.update(new_snapshot)
