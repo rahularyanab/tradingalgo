@@ -46,6 +46,7 @@ from config import (
     STRANGLE_CUTOFF_HOUR, STRANGLE_CUTOFF_MIN,
     FRIDAY_STRANGLE_CUTOFF, STRANGLE_SL_BUFFER,
     NIFTY_LOT_SIZE, TOTAL_MTM_MAX_LOSS,
+    DAILY_MAX_LOSS, REENTRY_COOLDOWN_CANDLES, MAX_SAME_DIR_REENTRIES,
 )
 from execution.mtm_guard import is_paused as _mtm_guard_is_paused
 from data.market_data import get_kite_client, fetch_nifty_candles, get_current_nifty_price
@@ -103,6 +104,11 @@ def _record_trade_exit(
     exit_reason: str,
 ):
     """Append trade to CSV journal and send Telegram record."""
+    # Accumulate today's realised P&L for the DAILY_MAX_LOSS breaker. The day
+    # rollover reset lives in run_scan(), so here we only add.
+    global _day_realised_pnl
+    _day_realised_pnl += total_pnl
+
     now = datetime.now()
     row = {
         "date":                 now.strftime("%Y-%m-%d"),
@@ -160,10 +166,15 @@ _kite         = None
 _kite_token   = None
 monitor       = TradeMonitor()
 strangle_legs: StrangleLegState | None = None   # tracks individual strangle legs
-_signal_exit_blocked: Optional[str]   = None    # direction blocked for rest of session after SIGNAL_EXIT
+_signal_exit_blocked: Optional[str]   = None    # direction under re-entry restriction after a SIGNAL_EXIT
 _signal_exit_reset_date = None   # last date _signal_exit_blocked was reset — detects day rollover
+_signal_exit_cooldown: int            = 0       # candles remaining before a same-direction re-entry is considered
+_reentry_count: dict                  = {"CALL_SELL": 0, "PUT_SELL": 0}  # STRONG re-entries used today, per direction
 _total_loss_hit: bool = False    # True once the whole-account MTM guard has squared off for the day
 _total_loss_reset_date = None   # last date _total_loss_hit was reset — detects day rollover
+_day_realised_pnl: float              = 0.0     # cumulative realised P&L today — drives the DAILY_MAX_LOSS breaker
+_day_pnl_reset_date = None       # last date _day_realised_pnl was reset — detects day rollover
+_day_loss_alerted: bool = False  # True once the daily-loss breaker has alerted for the day (avoids spamming)
 
 
 def _get_kite():
@@ -994,10 +1005,15 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
                 if hedge_exit_ltp is not None and trade.hedge_entry_premium is not None else 0.0
             )
             _record_trade_exit(trade, exit_ltp, hedge_exit_ltp, main_pnl, hedge_pnl, main_pnl + hedge_pnl, spot, "SIGNAL_EXIT")
-            # Block same-direction re-entry for the rest of the session
-            global _signal_exit_blocked
-            _signal_exit_blocked = trade.action
-            logger.info(f"Cooldown set: {trade.action} blocked for rest of session after SIGNAL_EXIT")
+            # Restrict same-direction re-entry: cool down for a few candles, then
+            # allow back only on a fresh STRONG signal (see the entry gate).
+            global _signal_exit_blocked, _signal_exit_cooldown
+            _signal_exit_blocked  = trade.action
+            _signal_exit_cooldown = REENTRY_COOLDOWN_CANDLES
+            logger.info(
+                f"Re-entry restricted: {trade.action} cooling down {REENTRY_COOLDOWN_CANDLES} "
+                f"candle(s) after SIGNAL_EXIT, then STRONG-only"
+            )
         monitor.clear_trade()
         strangle_legs = None
 
@@ -1066,14 +1082,22 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
 
 def run_scan():
     global strangle_legs, _signal_exit_blocked, _signal_exit_reset_date
+    global _signal_exit_cooldown, _reentry_count
+    global _day_realised_pnl, _day_pnl_reset_date, _day_loss_alerted
     if not _is_market_open():
         logger.info("Market closed — skipping.")
         return
 
     today = datetime.now().date()
     if _signal_exit_reset_date != today:
-        _signal_exit_blocked   = None
+        _signal_exit_blocked    = None
         _signal_exit_reset_date = today
+        _signal_exit_cooldown   = 0
+        _reentry_count          = {"CALL_SELL": 0, "PUT_SELL": 0}
+    if _day_pnl_reset_date != today:
+        _day_realised_pnl   = 0.0
+        _day_pnl_reset_date = today
+        _day_loss_alerted   = False
 
     logger.info("═" * 55)
     logger.info(f"Scan @ {datetime.now().strftime('%H:%M:%S')}")
@@ -1165,17 +1189,30 @@ def run_scan():
                 logger.info(f"Strangle single leg running: {strangle_legs.remaining_leg}")
 
         # ── New entry (no active trade) ───────────────────────────
-        elif not _total_loss_hit and _entry_allowed():
+        elif not _total_loss_hit and _entry_allowed() and _day_realised_pnl > -DAILY_MAX_LOSS:
             final = combine_signals(
                 tl=tl_result, rsi=rsi_result, opt=opt_signal,
                 spot_price=spot, expiry=oc.weekly_expiry_date,
             )
             logger.info(f"Signal: {final.action}  score={final.score}/3  lots={final.lots}")
 
-            if final.action == _signal_exit_blocked:
-                logger.info(f"Same-direction cooldown: {final.action} blocked after SIGNAL_EXIT — observing only")
+            # Same-direction re-entry control after a SIGNAL_EXIT: cool down for a
+            # few candles, then allow back only on a fresh STRONG (3/3) signal,
+            # capped per direction per day. Everything else enters normally.
+            blocked = final.action in ("CALL_SELL", "PUT_SELL") and final.action == _signal_exit_blocked
+            if blocked and _signal_exit_cooldown > 0:
+                _signal_exit_cooldown -= 1
+                logger.info(f"Re-entry cooldown: {final.action} — {_signal_exit_cooldown} candle(s) left, observing")
+                send_signal(final, observation=True)
+            elif blocked and final.score < 3:
+                logger.info(f"Re-entry needs STRONG (3/3): {final.action} is {final.score}/3 — observing")
+                send_signal(final, observation=True)
+            elif blocked and _reentry_count.get(final.action, 0) >= MAX_SAME_DIR_REENTRIES:
+                logger.info(f"Re-entry cap reached ({_reentry_count[final.action]}/{MAX_SAME_DIR_REENTRIES}) "
+                            f"for {final.action} — observing")
                 send_signal(final, observation=True)
             else:
+                is_reentry = blocked   # a qualified STRONG re-entry past cooldown
                 send_signal(final)
 
                 if final.action in ("CALL_SELL", "PUT_SELL"):
@@ -1204,6 +1241,13 @@ def run_scan():
                             hedge_strike=hedge_strike,
                             hedge_entry_premium=hedge_ltp,
                         ))
+                        if is_reentry:
+                            _reentry_count[final.action] = _reentry_count.get(final.action, 0) + 1
+                            logger.info(f"STRONG re-entry #{_reentry_count[final.action]} for {final.action}")
+                        # New trade is live — clear the restriction so a non-SIGNAL_EXIT
+                        # close (target/SL) can't leave a stale same-direction block.
+                        _signal_exit_blocked  = None
+                        _signal_exit_cooldown = 0
                         _save_state()
                     else:
                         send_error_alert(f"Entry order failed: {sell_res.error}")
@@ -1211,6 +1255,27 @@ def run_scan():
                 elif final.action == "STRANGLE" and _strangle_entry_allowed():
                     qty = final.strangle_lots * NIFTY_LOT_SIZE
                     _enter_strangle(kite, final, qty, spot, oc)
+                    _signal_exit_blocked  = None
+                    _signal_exit_cooldown = 0
+
+        elif not _total_loss_hit and _entry_allowed():
+            # Reachable only when the daily realised-loss breaker has tripped
+            # (entry window is open but _day_realised_pnl <= -DAILY_MAX_LOSS).
+            if not _day_loss_alerted:
+                _day_loss_alerted = True
+                _post(
+                    f"🛑 *DAILY LOSS LIMIT HIT*\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Realised P&L today: *{_fmt_pnl(_day_realised_pnl)}*  "
+                    f"(limit −₹{DAILY_MAX_LOSS:,})\n"
+                    f"_No more entries today. Existing position management continues._"
+                )
+                logger.info(f"Daily loss breaker tripped: realised ₹{_day_realised_pnl:,.0f} — entries halted")
+            final = combine_signals(
+                tl=tl_result, rsi=rsi_result, opt=opt_signal,
+                spot_price=spot, expiry=oc.weekly_expiry_date,
+            )
+            send_signal(final, observation=True)
         else:
             # Outside entry window (before 10:00 or after force-exit): observe only
             final = combine_signals(

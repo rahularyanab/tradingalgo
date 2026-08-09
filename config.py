@@ -97,6 +97,13 @@ PARTIAL_PROFIT_LOCK_PNL  = 5000  # ₹ unrealised threshold → exit all-but-1-l
 PROFIT_LOCK_ARM_PNL      = 1500  # ₹ unrealised (at entry lot size) to arm the trailing lock
 PROFIT_LOCK_GIVEBACK_PCT = 0.35  # exit if unrealised retraces this fraction from its peak once armed
 
+# ── Same-direction re-entry after a SIGNAL_EXIT ───────────────────
+# A signal exit blocks re-entry in that direction briefly, then allows it back
+# ONLY on a fresh STRONG (3/3) signal — treats the exit as a possible shakeout
+# rather than a permanent lockout, but caps how often it can happen per day.
+REENTRY_COOLDOWN_CANDLES = 2     # candles to wait after a SIGNAL_EXIT before a same-direction re-entry
+MAX_SAME_DIR_REENTRIES   = 2     # max STRONG re-entries per direction per day
+
 # ── Whole-account MTM guard (every open position, algo's own trade included) ──
 TOTAL_MTM_MAX_LOSS = 20000  # ₹ combined loss across ALL open positions → square off everything
 # Pause dates are no longer stored here — see execution/mtm_guard.py (JSON-backed,
