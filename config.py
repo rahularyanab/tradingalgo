@@ -67,16 +67,29 @@ INTRADAY_MODE      = True
 ENTRY_START_HOUR   = 10
 ENTRY_START_MIN    = 0            # first entry only after 10:00 (avoids opening noise)
 FORCE_EXIT_HOUR    = 14
-FORCE_EXIT_MIN     = 55           # square off directional positions at 14:55 (avoids 3 PM volatility spike; strangles held overnight regardless)
+FORCE_EXIT_MIN     = 55           # entry window closes at 14:55 — no new trades this late (unchanged)
+EOD_FLATTEN_HOUR   = 15           # 3:15 PM — single full flatten of whatever's open (directionals every
+EOD_FLATTEN_MIN    = 15           # day; strangles only the day before their own expiry). Replaces the old
+                                   # 2:55/3:25 split — the 3:25 leg sat 5 min from close, in the manipulation window.
 STRANGLE_CUTOFF_HOUR   = 14       # strangles allowed until 14:45 (overnight hold)
 STRANGLE_CUTOFF_MIN    = 45
 FRIDAY_STRANGLE_CUTOFF = 12       # no new strangles on Friday after 12:00 PM (gap risk)
 STRANGLE_SL_BUFFER     = 50       # same as directional (80 pts made losses bigger)
 
 # ── Lot sizing ────────────────────────────────────────────────────
+# These are STARTING sizes only. Positions can pyramid up to MAX_LOTS_*
+# below while in profit — see the Pyramiding section.
 LOTS_STRONG        = 3            # directional STRONG signal (3/3)
 LOTS_MODERATE      = 2            # directional MODERATE signal (2/3)
 LOTS_STRANGLE      = 2            # each leg of a strangle (non-directional)
+
+# ── Pyramiding (scale into strength, never into weakness) ─────────
+# Never applied on entry — only added on top of an already-profitable
+# position, so the risk on fresh capital never changes from today's sizing.
+MAX_LOTS_DIRECTIONAL    = 6       # pyramid ceiling for CALL_SELL/PUT_SELL — same cap for STRONG and MODERATE starts
+MAX_LOTS_STRANGLE_LEG   = 4       # pyramid ceiling per leg for STRANGLE
+PYRAMID_CONFIRM_CANDLES = 2       # consecutive in-profit + same-direction MODERATE+ candles before adding lots
+PYRAMID_STEP_LOTS       = 2       # lots added per pyramid step (last step trimmed to not overshoot the cap)
 
 # ── Scheduler ─────────────────────────────────────────────────────
 MARKET_OPEN_HOUR   = 9
@@ -92,10 +105,18 @@ MAX_ROLLS_PER_DAY        = 2
 BREAKOUT_CONFIRM_CANDLES = 2     # consecutive scans above resistance to confirm breakout
 REVERSAL_CONFIRM_CANDLES = 2     # consecutive reversal candles before adding hedge
 CLEAN_CONFIRM_CANDLES    = 2     # consecutive clean candles before removing hedge
-DAILY_MAX_LOSS           = 5000  # ₹ daily circuit breaker (realised + unrealised)
-PARTIAL_PROFIT_LOCK_PNL  = 5000  # ₹ unrealised threshold → exit all-but-1-lot to lock profit
+DAILY_MAX_LOSS           = 5000  # ₹ daily hard stop (realised + unrealised) — force-closes the open
+                                  # position the instant it's breached, in addition to blocking new entries
 PROFIT_LOCK_ARM_PNL      = 1500  # ₹ unrealised (at entry lot size) to arm the trailing lock
 PROFIT_LOCK_GIVEBACK_PCT = 0.35  # exit if unrealised retraces this fraction from its peak once armed
+
+# ── Profit-booking ladder ──────────────────────────────────────────
+# Replaces the old single-shot "cut to 1 lot at ₹5000" partial lock with
+# staged booking; the trailing lock above still protects whatever's left
+# running between/after these steps.
+PROFIT_BOOK_STEP1_PNL = 5000     # ₹ unrealised → book PROFIT_BOOK_STEP_LOTS lots
+PROFIT_BOOK_STEP2_PNL = 7500     # ₹ unrealised → book another PROFIT_BOOK_STEP_LOTS lots (remainder runs to EOD)
+PROFIT_BOOK_STEP_LOTS = 2        # lots booked at each ladder step
 
 # ── Same-direction re-entry after a SIGNAL_EXIT ───────────────────
 # A signal exit blocks re-entry in that direction briefly, then allows it back

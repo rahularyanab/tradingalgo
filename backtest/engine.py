@@ -89,13 +89,16 @@ class BacktestTrade:
     pe_active:       bool  = True    # strangle: is PE leg still open?
     ce_closed_pnl:   float = 0.0    # P&L realised when CE leg closed early
     pe_closed_pnl:   float = 0.0    # P&L realised when PE leg closed early
-    # evaluate_position() (signals/position_manager.py) reads these on every
-    # CALL_SELL/PUT_SELL trade — must exist even though backtest never passes
-    # current_ltp, so the profit-lock checks stay dormant (no simulated LTP
-    # feed) rather than crashing with AttributeError.
-    partial_profit_locked: bool  = False
+    # evaluate_position() (signals/position_manager.py) reads/writes these on
+    # every CALL_SELL/PUT_SELL/STRANGLE trade — must exist for defensive
+    # parity, even though backtest never passes current_ltp so the profit-lock,
+    # profit-booking-ladder, and pyramiding checks all stay dormant (no
+    # simulated LTP feed) rather than crashing with AttributeError.
     peak_unrealised:       float = 0.0
     entry_lots:            int   = 0
+    profit_booked_step1:   bool  = False
+    profit_booked_step2:   bool  = False
+    pyramid_confirm_count: int   = 0
 
     def __post_init__(self):
         if self.entry_lots == 0:

@@ -3,18 +3,28 @@ Active position management — evaluates every 15-min candle while in a trade.
 
 Rules:
   STRANGLE
-    Bullish ≥2/3 → exit CE leg (going ITM), let PE decay to zero
-    Bearish ≥2/3 → exit PE leg (going ITM), let CE decay to zero
+    Target hit                          → exit everything
+    Profit-booking ladder (both legs)   → book PROFIT_BOOK_STEP_LOTS at ₹5000, again at ₹7500
+    Bullish ≥2/3                        → exit CE leg (going ITM), let PE decay to zero
+    Bearish ≥2/3                        → exit PE leg (going ITM), let CE decay to zero
+    Still range-bound + in profit,
+    sustained PYRAMID_CONFIRM_CANDLES   → add PYRAMID_STEP_LOTS to both legs (cap MAX_LOTS_STRANGLE_LEG)
 
   CALL SELL (bearish position)
-    Opposing bullish 3/3 → exit + enter PUT SELL (ride the reversal)
-    Opposing bullish 2/3 → exit + enter STRANGLE (trend unclear)
+    Trailing profit lock                → protect gains once they've meaningfully retraced
+    Profit-booking ladder                → book lots at ₹5000 / ₹7500, rest runs to EOD
+    In profit + sustained bearish
+    confirmation (≥MIN_SIGNAL_SCORE)     → pyramid up (cap MAX_LOTS_DIRECTIONAL)
+    Opposing bullish 3/3                 → exit + enter PUT SELL (ride the reversal)
+    Opposing bullish 2/3                 → exit + enter STRANGLE (trend unclear)
 
   PUT SELL (bullish position)
-    Opposing bearish 3/3 → exit + enter CALL SELL (ride the reversal)
-    Opposing bearish 2/3 → exit + enter STRANGLE (trend unclear)
+    Mirror of CALL SELL.
 
   Developing divergence alone → WARNING only, no exit yet
+
+Pyramiding never applies at entry — only on top of an already-profitable
+position, so the risk on fresh capital never changes from the starting size.
 """
 
 import logging
@@ -24,8 +34,11 @@ from typing import Optional
 from config import (PCR_BULLISH, PCR_BEARISH, MIN_SIGNAL_SCORE,
                     ROLL_THRESHOLD_PTS, MAX_ROLLS_PER_DAY,
                     BREAKOUT_CONFIRM_CANDLES, REVERSAL_CONFIRM_CANDLES, CLEAN_CONFIRM_CANDLES,
-                    PARTIAL_PROFIT_LOCK_PNL, NIFTY_LOT_SIZE, TARGET_DECAY_PCT,
-                    PROFIT_LOCK_ARM_PNL, PROFIT_LOCK_GIVEBACK_PCT)
+                    NIFTY_LOT_SIZE, TARGET_DECAY_PCT,
+                    PROFIT_LOCK_ARM_PNL, PROFIT_LOCK_GIVEBACK_PCT,
+                    PROFIT_BOOK_STEP1_PNL, PROFIT_BOOK_STEP2_PNL, PROFIT_BOOK_STEP_LOTS,
+                    MAX_LOTS_DIRECTIONAL, MAX_LOTS_STRANGLE_LEG,
+                    PYRAMID_CONFIRM_CANDLES, PYRAMID_STEP_LOTS)
 from strategy.trendline import TrendlineResult
 from strategy.rsi_divergence import RSIResult
 from strategy.option_signal import OptionSignal
@@ -77,6 +90,7 @@ class ManagementDecision:
     score:      int            # signal score that triggered this
     new_action: Optional[str]  = None   # "CALL_SELL"|"PUT_SELL"|"STRANGLE" after exit
     reasons:    list           = field(default_factory=list)
+    lots:       Optional[int]  = None   # lot count for PROFIT_BOOK (book) / PYRAMID_ADD (add)
 
 
 @dataclass
@@ -103,7 +117,8 @@ ROLL_UP              = "ROLL_UP"              # PUT_SELL: roll to higher strike
 ROLL_DOWN            = "ROLL_DOWN"            # CALL_SELL: roll to lower strike
 ADD_HEDGE_LEG        = "ADD_HEDGE_LEG"        # add opposite leg (convert to hedged strangle)
 REMOVE_HEDGE_LEG     = "REMOVE_HEDGE_LEG"     # remove hedge leg (revert to directional)
-PARTIAL_PROFIT_LOCK  = "PARTIAL_PROFIT_LOCK"  # exit all-but-1-lot, leave 1 running free
+PROFIT_BOOK          = "PROFIT_BOOK"          # book `lots` lots of profit at a ladder checkpoint
+PYRAMID_ADD          = "PYRAMID_ADD"          # add `lots` lots on top of an already-profitable position
 
 
 def bullish_score(tl: TrendlineResult, rsi: RSIResult, opt: OptionSignal) -> tuple[int, list[str]]:
@@ -140,6 +155,11 @@ def bearish_score(tl: TrendlineResult, rsi: RSIResult, opt: OptionSignal) -> tup
     return score, reasons
 
 
+def _book_lots(current_lot_count: int) -> int:
+    """Lots to book at a ladder rung — clamped so at least 1 lot keeps running."""
+    return min(PROFIT_BOOK_STEP_LOTS, current_lot_count - 1)
+
+
 def evaluate_position(
     trade:                   TradeState,
     tl:                      TrendlineResult,
@@ -170,6 +190,7 @@ def evaluate_position(
         # combined entry premium vs. current premium of whichever legs are
         # still active (a leg already closed keeps counting toward the
         # original combined baseline, same as paper trading does).
+        active_prem_sum: Optional[float] = None
         if legs:
             current_prems = []
             if legs.ce_active and strangle_ce_ltp is not None:
@@ -178,13 +199,50 @@ def evaluate_position(
                 current_prems.append(strangle_pe_ltp)
             active_count = (1 if legs.ce_active else 0) + (1 if legs.pe_active else 0)
             if current_prems and len(current_prems) == active_count:
+                active_prem_sum = sum(current_prems)
                 target_prem = trade.entry_premium * (1 - TARGET_DECAY_PCT)
-                if sum(current_prems) <= target_prem:
+                if active_prem_sum <= target_prem:
                     return ManagementDecision(
                         action=EXIT_FULL,
                         reason=(
-                            f"Target hit: combined premium ₹{sum(current_prems):.2f} "
+                            f"Target hit: combined premium ₹{active_prem_sum:.2f} "
                             f"≤ ₹{target_prem:.2f} ({int(TARGET_DECAY_PCT*100)}% decay from ₹{trade.entry_premium:.2f})"
+                        ),
+                        score=0,
+                    )
+
+        current_lot_count = trade.lots // NIFTY_LOT_SIZE
+        unrealised_strangle = (
+            (trade.entry_premium - active_prem_sum) * trade.lots
+            if active_prem_sum is not None else None
+        )
+
+        # ── Profit-booking ladder (both legs together) ──────────────
+        if (
+            legs and legs.ce_active and legs.pe_active
+            and unrealised_strangle is not None
+            and current_lot_count > 1
+        ):
+            if trade.profit_booked_step1 and not trade.profit_booked_step2 \
+                    and unrealised_strangle >= PROFIT_BOOK_STEP2_PNL:
+                book_lots = _book_lots(current_lot_count)
+                if book_lots > 0:
+                    return ManagementDecision(
+                        action=PROFIT_BOOK, lots=book_lots,
+                        reason=(
+                            f"Unrealised ₹{unrealised_strangle:,.0f} hit step-2 (₹{PROFIT_BOOK_STEP2_PNL:,}) "
+                            f"— booking {book_lots} lot(s) each leg, rest runs to EOD"
+                        ),
+                        score=0,
+                    )
+            elif not trade.profit_booked_step1 and unrealised_strangle >= PROFIT_BOOK_STEP1_PNL:
+                book_lots = _book_lots(current_lot_count)
+                if book_lots > 0:
+                    return ManagementDecision(
+                        action=PROFIT_BOOK, lots=book_lots,
+                        reason=(
+                            f"Unrealised ₹{unrealised_strangle:,.0f} hit step-1 (₹{PROFIT_BOOK_STEP1_PNL:,}) "
+                            f"— booking {book_lots} lot(s) each leg"
                         ),
                         score=0,
                     )
@@ -214,6 +272,28 @@ def evaluate_position(
                     reasons=bear_reasons,
                 )
 
+            # ── Pyramid add: still genuinely range-bound and in profit ──
+            still_neutral = bull_score < SWITCH_THRESHOLD and bear_score < SWITCH_THRESHOLD
+            if (
+                unrealised_strangle is not None and unrealised_strangle > 0
+                and still_neutral
+                and current_lot_count < MAX_LOTS_STRANGLE_LEG
+            ):
+                trade.pyramid_confirm_count += 1
+                if trade.pyramid_confirm_count >= PYRAMID_CONFIRM_CANDLES:
+                    add_lots = min(PYRAMID_STEP_LOTS, MAX_LOTS_STRANGLE_LEG - current_lot_count)
+                    return ManagementDecision(
+                        action=PYRAMID_ADD, lots=add_lots,
+                        reason=(
+                            f"Range-bound + in profit (₹{unrealised_strangle:,.0f}) for "
+                            f"{trade.pyramid_confirm_count} candles — adding {add_lots} lot(s) to both legs "
+                            f"(cap {MAX_LOTS_STRANGLE_LEG})"
+                        ),
+                        score=0,
+                    )
+            else:
+                trade.pyramid_confirm_count = 0
+
         elif legs and legs.remaining_leg == "CE":
             # Only CE (call) remains — if bearish confirmed, keep holding
             # If bullish ≥ 2, CE going ITM → exit
@@ -239,8 +319,8 @@ def evaluate_position(
         return ManagementDecision(action=HOLD, reason="Strangle — no actionable signal change.", score=0)
 
     # ── Track peak unrealised profit (at entry lot size) ───────────
-    # Tracked at entry_lots rather than the possibly-reduced trade.lots, so a
-    # later partial-lock resize doesn't distort the high-water mark.
+    # Tracked at entry_lots rather than the live (booked-down/pyramided-up)
+    # trade.lots, so a lot-count change doesn't distort the high-water mark.
     if trade.action in ("CALL_SELL", "PUT_SELL") and current_ltp is not None:
         tracked_unrealised = (trade.entry_premium - current_ltp) * trade.entry_lots
         if tracked_unrealised > trade.peak_unrealised:
@@ -249,50 +329,78 @@ def evaluate_position(
     # ── Trailing profit lock — protect gains once they've meaningfully retraced ──
     # Arms once unrealised has ever reached PROFIT_LOCK_ARM_PNL; once armed, a
     # retrace of PROFIT_LOCK_GIVEBACK_PCT from that peak exits immediately. This
-    # catches a trade that was comfortably in profit but never crossed the flat
-    # PARTIAL_PROFIT_LOCK_PNL threshold below, then round-tripped into a loss.
+    # catches a trade that was comfortably in profit but never crossed the
+    # profit-booking ladder below, then round-tripped into a loss.
     if (
         trade.action in ("CALL_SELL", "PUT_SELL")
         and current_ltp is not None
         and trade.peak_unrealised >= PROFIT_LOCK_ARM_PNL
     ):
-        current_unrealised = (trade.entry_premium - current_ltp) * trade.entry_lots
+        current_unrealised_tracked = (trade.entry_premium - current_ltp) * trade.entry_lots
         giveback_floor = trade.peak_unrealised * (1 - PROFIT_LOCK_GIVEBACK_PCT)
-        if current_unrealised <= giveback_floor:
+        if current_unrealised_tracked <= giveback_floor:
             return ManagementDecision(
                 action=EXIT_FULL,
                 reason=(
-                    f"Trailing profit lock: unrealised ₹{current_unrealised:,.0f} retraced from peak "
+                    f"Trailing profit lock: unrealised ₹{current_unrealised_tracked:,.0f} retraced from peak "
                     f"₹{trade.peak_unrealised:,.0f} (floor ₹{giveback_floor:,.0f}, "
                     f"{int(PROFIT_LOCK_GIVEBACK_PCT*100)}% giveback) — exiting to protect gains"
                 ),
                 score=0,
             )
 
-    # ── Partial profit lock (CALL SELL / PUT SELL only) ─────────
-    # When unrealised P&L ≥ threshold and we have more than 1 lot, exit all-but-1.
-    # The last lot runs free; the 2-consecutive-signal exit will clean it up.
-    if (
-        trade.action in ("CALL_SELL", "PUT_SELL")
-        and not trade.partial_profit_locked
-        and trade.lots > NIFTY_LOT_SIZE          # must have at least 2 lots to partially exit
-        and current_ltp is not None
-    ):
-        unrealised = (trade.entry_premium - current_ltp) * trade.lots
-        if unrealised >= PARTIAL_PROFIT_LOCK_PNL:
-            lock_qty = trade.lots - NIFTY_LOT_SIZE
-            logger.info(
-                f"Partial profit lock: unrealised ₹{unrealised:,.0f} ≥ ₹{PARTIAL_PROFIT_LOCK_PNL:,}"
-                f" — exiting {lock_qty} of {trade.lots} shares, 1 lot ({NIFTY_LOT_SIZE}) running free"
-            )
-            return ManagementDecision(
-                action=PARTIAL_PROFIT_LOCK,
-                reason=(
-                    f"Unrealised ₹{unrealised:,.0f} hit target — locking profit on {lock_qty} shares, "
-                    f"leaving {NIFTY_LOT_SIZE} shares (1 lot) to run free"
-                ),
-                score=0,
-            )
+    # ── Profit-booking ladder (CALL SELL / PUT SELL) ───────────────
+    # Uses the REAL current position (current lots, not entry_lots) — this is
+    # about banking real money, unlike the entry_lots-normalised trailing lock above.
+    if trade.action in ("CALL_SELL", "PUT_SELL") and current_ltp is not None:
+        current_lot_count = trade.lots // NIFTY_LOT_SIZE
+        unrealised_now = (trade.entry_premium - current_ltp) * trade.lots
+        if current_lot_count > 1:
+            if trade.profit_booked_step1 and not trade.profit_booked_step2 \
+                    and unrealised_now >= PROFIT_BOOK_STEP2_PNL:
+                book_lots = _book_lots(current_lot_count)
+                if book_lots > 0:
+                    return ManagementDecision(
+                        action=PROFIT_BOOK, lots=book_lots,
+                        reason=(
+                            f"Unrealised ₹{unrealised_now:,.0f} hit step-2 (₹{PROFIT_BOOK_STEP2_PNL:,}) "
+                            f"— booking {book_lots} lot(s), rest runs to EOD"
+                        ),
+                        score=0,
+                    )
+            elif not trade.profit_booked_step1 and unrealised_now >= PROFIT_BOOK_STEP1_PNL:
+                book_lots = _book_lots(current_lot_count)
+                if book_lots > 0:
+                    return ManagementDecision(
+                        action=PROFIT_BOOK, lots=book_lots,
+                        reason=(
+                            f"Unrealised ₹{unrealised_now:,.0f} hit step-1 (₹{PROFIT_BOOK_STEP1_PNL:,}) "
+                            f"— booking {book_lots} lot(s)"
+                        ),
+                        score=0,
+                    )
+
+        # ── Pyramid add: in profit + sustained same-direction confirmation ──
+        # For CALL_SELL, bear_score confirms (bearish = favourable); for PUT_SELL, bull_score.
+        favourable_score = bear_score if trade.action == "CALL_SELL" else bull_score
+        if (
+            unrealised_now > 0
+            and favourable_score >= MIN_SIGNAL_SCORE
+            and current_lot_count < MAX_LOTS_DIRECTIONAL
+        ):
+            trade.pyramid_confirm_count += 1
+            if trade.pyramid_confirm_count >= PYRAMID_CONFIRM_CANDLES:
+                add_lots = min(PYRAMID_STEP_LOTS, MAX_LOTS_DIRECTIONAL - current_lot_count)
+                return ManagementDecision(
+                    action=PYRAMID_ADD, lots=add_lots,
+                    reason=(
+                        f"In profit (₹{unrealised_now:,.0f}) with {favourable_score}/3 confirming for "
+                        f"{trade.pyramid_confirm_count} candles — adding {add_lots} lot(s) (cap {MAX_LOTS_DIRECTIONAL})"
+                    ),
+                    score=favourable_score,
+                )
+        else:
+            trade.pyramid_confirm_count = 0
 
     # ── CALL SELL management (bearish position) ───────────────────
     if trade.action == "CALL_SELL":

@@ -855,13 +855,13 @@ def send_trade_journal_entry(
         return f"+₹{p:,.0f}" if p >= 0 else f"−₹{abs(p):,.0f}"
 
     REASON_LABEL = {
-        "FORCE_EXIT_255PM": "2:55 PM force exit",
-        "FORCE_EXIT_325PM": "3:25 PM force exit",
+        "EOD_FLATTEN":    "3:15 PM EOD flatten",
         "SL_HIT":         "Stop loss hit",
         "MANAGEMENT_EXIT":"Position management exit",
         "STRANGLE_TARGET":     "Target hit — 65% premium decay",
         "STRANGLE_SIGNAL_EXIT":"Signal-based full exit",
-        "PARTIAL_PROFIT_LOCK": "Partial profit lock",
+        "PROFIT_BOOK":          "Profit booked (ladder)",
+        "DAILY_LOSS_BREAKER":  "Daily loss breaker",
     }
 
     entry_spot_s = f"{trade.entry_spot:.0f}" if trade.entry_spot > 0 else "—"

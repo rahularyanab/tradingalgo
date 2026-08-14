@@ -43,10 +43,12 @@ class TradeState:
     hedge_strike:          Optional[int]   = None   # strike of hedge leg (for LTP lookup at exit)
     hedge_entry_premium:   Optional[float] = None   # price paid for hedge at entry (for P&L)
     sl_put:                Optional[float] = None   # strangle put-leg SL (sl_spot_level = call-leg SL)
-    partial_profit_locked: bool            = False  # True after partial exit fires (prevents re-trigger)
     peak_unrealised:       float           = 0.0    # highest unrealised profit (₹, at entry_lots) seen so far
     entry_lots:            int             = 0      # lot-size snapshot at trade open — keeps the peak
-                                                      # calc valid even after a partial-lock resize
+                                                      # calc valid even after a lot-count resize
+    profit_booked_step1:   bool            = False  # True once the ₹PROFIT_BOOK_STEP1_PNL ladder rung has fired
+    profit_booked_step2:   bool            = False  # True once the ₹PROFIT_BOOK_STEP2_PNL ladder rung has fired
+    pyramid_confirm_count: int             = 0      # consecutive in-profit + confirming candles toward a pyramid add
 
     def __post_init__(self):
         if self.entry_lots == 0:

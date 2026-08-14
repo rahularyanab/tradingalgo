@@ -14,8 +14,14 @@ Trade management (every 15-min candle):
     Bearish 3/3  → exit + enter CALL SELL
     Bearish 2/3  → exit + enter STRANGLE
 
-Strangles held overnight. Directionals force-exited at 2:55 PM — split
-across 2:55/3:25 PM (ceil half now, floor half at 3:25) when 2+ lots are open.
+Positions can pyramid up (in profit only, never on fresh capital) toward
+MAX_LOTS_DIRECTIONAL / MAX_LOTS_STRANGLE_LEG, and book profit in two steps
+along the way (₹5000 → 2 lots, ₹7500 → 2 more). A daily-loss hard stop at
+-₹DAILY_MAX_LOSS force-closes the open position, not just new entries.
+
+Directionals are flattened in one shot at EOD_FLATTEN (3:15 PM) every day.
+Strangles hold overnight normally, but also flatten at 3:15 PM on the day
+BEFORE their own expiry (margin doesn't improve waiting for expiry day itself).
 No new strangles on Friday after 12 PM.
 
 Requires:
@@ -43,10 +49,12 @@ from config import (
     MARKET_CLOSE_HOUR, MARKET_CLOSE_MIN,
     ENTRY_START_HOUR, ENTRY_START_MIN,
     FORCE_EXIT_HOUR, FORCE_EXIT_MIN,
+    EOD_FLATTEN_HOUR, EOD_FLATTEN_MIN,
     STRANGLE_CUTOFF_HOUR, STRANGLE_CUTOFF_MIN,
     FRIDAY_STRANGLE_CUTOFF, STRANGLE_SL_BUFFER,
     NIFTY_LOT_SIZE, TOTAL_MTM_MAX_LOSS,
     DAILY_MAX_LOSS, REENTRY_COOLDOWN_CANDLES, MAX_SAME_DIR_REENTRIES,
+    MAX_LOTS_DIRECTIONAL, MAX_LOTS_STRANGLE_LEG,
 )
 from execution.mtm_guard import is_paused as _mtm_guard_is_paused
 from data.market_data import get_kite_client, fetch_nifty_candles, get_current_nifty_price
@@ -58,10 +66,10 @@ from notifications.telegram_bot import (
 from notifications.telegram_commands import start_command_listener
 from signals.combiner import combine_signals
 from signals.position_manager import (
-    evaluate_position, StrangleLegState,
+    evaluate_position, StrangleLegState, ManagementDecision,
     EXIT_CE_LEG, EXIT_PE_LEG, EXIT_FULL,
     REVERSE_CALL_SELL, REVERSE_PUT_SELL, SWITCH_STRANGLE, HOLD,
-    PARTIAL_PROFIT_LOCK,
+    PROFIT_BOOK, PYRAMID_ADD,
 )
 from signals.trade_monitor import TradeMonitor, TradeState
 from strategy.option_signal import analyse_option_signal
@@ -91,6 +99,29 @@ JOURNAL_FIELDS = [
 
 def _fmt_pnl(p: float) -> str:
     return f"+₹{p:,.0f}" if p >= 0 else f"−₹{abs(p):,.0f}"
+
+
+def _current_unrealised(trade: TradeState, sl, current_ltp, strangle_ce_ltp, strangle_pe_ltp):
+    """Unrealised P&L (₹) of the currently open position at its REAL current
+    size — main leg(s) only, no hedge netting (same convention as the
+    profit-booking ladder / trailing lock). None if an LTP is unavailable.
+    `sl` is the active StrangleLegState (or None)."""
+    if trade.action == "STRANGLE":
+        if sl is None:
+            return None
+        total = 0.0
+        if sl.ce_active:
+            if strangle_ce_ltp is None:
+                return None
+            total += (sl.ce_entry_premium - strangle_ce_ltp) * trade.lots
+        if sl.pe_active:
+            if strangle_pe_ltp is None:
+                return None
+            total += (sl.pe_entry_premium - strangle_pe_ltp) * trade.lots
+        return total
+    if current_ltp is None:
+        return None
+    return (trade.entry_premium - current_ltp) * trade.lots
 
 
 def _record_trade_exit(
@@ -243,9 +274,11 @@ def _save_state():
             "hedge_strike":          trade.hedge_strike,
             "hedge_entry_premium":   trade.hedge_entry_premium,
             "sl_put":                trade.sl_put,
-            "partial_profit_locked": trade.partial_profit_locked,
             "peak_unrealised":       trade.peak_unrealised,
             "entry_lots":            trade.entry_lots,
+            "profit_booked_step1":   trade.profit_booked_step1,
+            "profit_booked_step2":   trade.profit_booked_step2,
+            "pyramid_confirm_count": trade.pyramid_confirm_count,
         }
         if trade.action == "STRANGLE" and strangle_legs:
             sl = strangle_legs
@@ -350,9 +383,11 @@ def _restore_positions_from_kite():
         hedge_strike           = t.get("hedge_strike"),
         hedge_entry_premium    = t.get("hedge_entry_premium"),
         sl_put                 = t.get("sl_put"),
-        partial_profit_locked  = t.get("partial_profit_locked", False),
         peak_unrealised        = t.get("peak_unrealised", 0.0),
         entry_lots             = t.get("entry_lots", t.get("lots", 0)),
+        profit_booked_step1    = t.get("profit_booked_step1", False),
+        profit_booked_step2    = t.get("profit_booked_step2", False),
+        pyramid_confirm_count  = t.get("pyramid_confirm_count", 0),
     ))
 
     sl = state.get("strangle_legs")
@@ -462,12 +497,9 @@ def _check_total_mtm():
     _post("\n".join(lines))
 
 
-def _close_directional_slice(trade, kite, spot, oc_exit, exit_qty, tag, time_label, remaining_qty=0):
-    """
-    Buy back `exit_qty` shares of the sold leg (and unwind the matching hedge
-    quantity), record P&L for that slice, and either close the trade fully
-    (remaining_qty == 0) or leave it open with `remaining_qty` shares running.
-    """
+def _close_directional_slice(trade, kite, spot, oc_exit, exit_qty, tag, time_label):
+    """Buy back `exit_qty` shares of the sold leg (and unwind the matching hedge
+    quantity), record P&L, and close the trade."""
     opt_type       = "CE" if trade.action == "CALL_SELL" else "PE"
     exit_ltp       = None
     hedge_exit_ltp = None
@@ -498,9 +530,8 @@ def _close_directional_slice(trade, kite, spot, oc_exit, exit_qty, tag, time_lab
     entry_spot_s = f"`{trade.entry_spot:.0f}`" if trade.entry_spot > 0 else "N/A"
     exited_lots  = exit_qty // NIFTY_LOT_SIZE
 
-    header = f"🔔 *FORCE EXIT — {time_label}*" if remaining_qty == 0 else f"🔔 *PARTIAL FORCE EXIT — {time_label}*"
     lines = [
-        header,
+        f"🔔 *FORCE EXIT — {time_label}*",
         f"━━━━━━━━━━━━━━━━━━━━",
         f"Trade: *{trade.action.replace('_', ' ')} {trade.strike}*  Expiry {trade.expiry}",
         f"Entry spot: {entry_spot_s}  |  Exit spot: `{spot:.0f}`",
@@ -514,26 +545,37 @@ def _close_directional_slice(trade, kite, spot, oc_exit, exit_qty, tag, time_lab
     lines += [
         f"",
         f"{pnl_emoji} *Net P&L: {_fmt_pnl(total_pnl)}*",
+        f"━━━━━━━━━━━━━━━━━━━━",
     ]
-    if remaining_qty > 0:
-        remaining_lots = remaining_qty // NIFTY_LOT_SIZE
-        lines.append(f"📌 *{remaining_lots} lot{'s' if remaining_lots != 1 else ''} still running — exits at 3:25 PM*")
-    lines.append(f"━━━━━━━━━━━━━━━━━━━━")
     _post("\n".join(lines))
 
     journal_trade = replace(trade, lots=exit_qty)
     _record_trade_exit(journal_trade, exit_ltp, hedge_exit_ltp, main_pnl, hedge_pnl, total_pnl, spot, tag)
 
-    if remaining_qty > 0:
-        monitor.trade.lots = remaining_qty
-    else:
-        monitor.clear_trade()
+    monitor.clear_trade()
     _save_state()
 
 
-def force_exit_all():
-    """2:55 PM — close directional trades. Splits the exit across 2:55/3:25 PM
-    when 2+ lots are open (ceil half now, floor half at 3:25). Strangles held overnight."""
+def _parse_expiry_date(expiry_str: str):
+    """Parse trade.expiry ('%d-%b-%Y' or '%Y-%m-%d', matching the two formats
+    used elsewhere in the codebase) into a date. None if unparseable."""
+    for fmt in ("%d-%b-%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(expiry_str, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def eod_flatten():
+    """
+    3:15 PM — single full flatten, replacing the old 2:55/3:25 split (which put
+    half the exit 5 minutes from close, in the manipulation-prone window).
+    Directionals close here every day. Strangles only close here the day
+    BEFORE their own expiry — margin gets worse, not better, on expiry day
+    itself, so waiting until then is counterproductive; on any other day a
+    strangle keeps holding overnight as before.
+    """
     if monitor.trade is None:
         return
 
@@ -542,24 +584,38 @@ def force_exit_all():
         kite = _get_kite()
         spot = get_current_nifty_price(kite)
     except Exception:
-        kite = None
-        spot = 0.0
+        kite, spot = None, 0.0
 
     if trade.action == "STRANGLE":
-        active_legs = []
-        if strangle_legs:
-            if strangle_legs.ce_active:
-                active_legs.append(f"CE {strangle_legs.ce_strike}")
-            if strangle_legs.pe_active:
-                active_legs.append(f"PE {strangle_legs.pe_strike}")
-        _post(
-            f"🌙 *STRANGLE — HOLDING OVERNIGHT*\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"Active legs: *{' + '.join(active_legs)}*\n"
-            f"Entry spot: `{trade.entry_spot:.1f}`  |  Now: `{spot:.1f}`\n"
-            f"Expiry: {trade.expiry}\n"
-            f"_SL and target monitoring continues tomorrow._"
-        )
+        expiry_date = _parse_expiry_date(trade.expiry)
+        is_day_before_expiry = expiry_date is not None and (expiry_date - datetime.now().date()).days == 1
+        if not is_day_before_expiry:
+            active_legs = []
+            if strangle_legs:
+                if strangle_legs.ce_active:
+                    active_legs.append(f"CE {strangle_legs.ce_strike}")
+                if strangle_legs.pe_active:
+                    active_legs.append(f"PE {strangle_legs.pe_strike}")
+            _post(
+                f"🌙 *STRANGLE — HOLDING OVERNIGHT*\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"Active legs: *{' + '.join(active_legs)}*\n"
+                f"Entry spot: `{trade.entry_spot:.1f}`  |  Now: `{spot:.1f}`\n"
+                f"Expiry: {trade.expiry}\n"
+                f"_SL and target monitoring continues tomorrow._"
+            )
+            return
+
+        logger.info(f"EOD flatten (day before expiry): STRANGLE {trade.strike}/{trade.expiry}")
+        oc_exit = None
+        if kite:
+            try:
+                oc_exit = fetch_option_chain(kite=kite)
+            except Exception:
+                oc_exit = None
+        reason = "EOD flatten — day before expiry (margin doesn't improve waiting for expiry day itself)"
+        decision = ManagementDecision(action=EXIT_FULL, reason=reason, reasons=[reason], score=0)
+        _handle_management_decision(decision, trade, spot, None, None, None, oc_exit, None)
         return
 
     oc_exit = None
@@ -569,41 +625,9 @@ def force_exit_all():
         except Exception:
             oc_exit = None
 
-    num_lots = trade.lots // NIFTY_LOT_SIZE
-    if num_lots <= 1:
-        logger.info(f"2:55 PM force exit: {trade.action} {trade.strike}")
-        _close_directional_slice(trade, kite, spot, oc_exit, trade.lots,
-                                  tag="FORCE_EXIT_255PM", time_label="2:55 PM", remaining_qty=0)
-        return
-
-    first_lots  = -(-num_lots // 2)          # ceil(num_lots / 2)
-    second_lots = num_lots - first_lots
-    exit_qty    = first_lots  * NIFTY_LOT_SIZE
-    remain_qty  = second_lots * NIFTY_LOT_SIZE
-    logger.info(
-        f"2:55 PM partial force exit: {trade.action} {trade.strike}  "
-        f"{first_lots} lot(s) now, {second_lots} lot(s) held to 3:25 PM"
-    )
-    _close_directional_slice(trade, kite, spot, oc_exit, exit_qty,
-                              tag="FORCE_EXIT_255PM", time_label="2:55 PM", remaining_qty=remain_qty)
-
-
-def force_exit_remaining():
-    """3:25 PM — close whatever's left of a directional trade after the 2:55 PM partial exit."""
-    if monitor.trade is None or monitor.trade.action == "STRANGLE":
-        return
-
-    trade = monitor.trade
-    try:
-        kite    = _get_kite()
-        spot    = get_current_nifty_price(kite)
-        oc_exit = fetch_option_chain(kite=kite)
-    except Exception:
-        kite, spot, oc_exit = None, 0.0, None
-
-    logger.info(f"3:25 PM force exit: {trade.action} {trade.strike}")
+    logger.info(f"EOD flatten: {trade.action} {trade.strike}")
     _close_directional_slice(trade, kite, spot, oc_exit, trade.lots,
-                              tag="FORCE_EXIT_325PM", time_label="3:25 PM", remaining_qty=0)
+                              tag="EOD_FLATTEN", time_label="3:15 PM")
 
 
 def _register_strangle(signal, spot, oc):
@@ -903,34 +927,185 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
         strangle_legs.pe_active = False
         logger.info(f"PE leg {strangle_legs.pe_strike} closed. CE {strangle_legs.ce_strike} running.")
 
-    elif decision.action == PARTIAL_PROFIT_LOCK:
-        lock_qty = trade.lots - NIFTY_LOT_SIZE   # exit all-but-1-lot
-        exit_ltp = None
-        if lock_qty > 0:
+    elif decision.action == PROFIT_BOOK:
+        book_lots = decision.lots or 0
+        book_qty  = book_lots * NIFTY_LOT_SIZE
+        if trade.action == "STRANGLE" and strangle_legs:
+            legs      = strangle_legs
+            ce_exit_ltp = pe_exit_ltp = None
+            ce_pnl = pe_pnl = 0.0
+            ce_ok = pe_ok = True
+            if book_qty > 0 and legs.ce_active:
+                sd = oc.call_data.get(legs.ce_strike)
+                ce_exit_ltp = sd.ltp if sd and sd.ltp > 0 else None
+                r = place_buy_order(kite, legs.ce_symbol, book_qty, price=_buy_price(oc, "CE", legs.ce_strike))
+                if not r.success:
+                    send_error_alert(f"Profit-book CE order failed: {r.error}")
+                    ce_ok = False
+                else:
+                    ce_pnl = (legs.ce_entry_premium - (ce_exit_ltp or legs.ce_entry_premium)) * book_qty
+            if book_qty > 0 and legs.pe_active:
+                sd = oc.put_data.get(legs.pe_strike)
+                pe_exit_ltp = sd.ltp if sd and sd.ltp > 0 else None
+                r = place_buy_order(kite, legs.pe_symbol, book_qty, price=_buy_price(oc, "PE", legs.pe_strike))
+                if not r.success:
+                    send_error_alert(f"Profit-book PE order failed: {r.error}")
+                    pe_ok = False
+                else:
+                    pe_pnl = (legs.pe_entry_premium - (pe_exit_ltp or legs.pe_entry_premium)) * book_qty
+            if not (ce_ok and pe_ok):
+                # Both legs share a single trade.lots — if only one side's buy-back
+                # actually filled, decrementing lots would understate what's still
+                # short on the other side and leave a naked residual at exit time.
+                send_error_alert(
+                    f"⚠️ Profit-book PARTIALLY filled on STRANGLE {legs.ce_strike}/{legs.pe_strike}: "
+                    f"CE={'OK' if ce_ok else 'FAILED'}  PE={'OK' if pe_ok else 'FAILED'}"
+                    f" — trade.lots NOT updated, please reconcile manually against broker positions."
+                )
+                return
+            locked_pnl = ce_pnl + pe_pnl
+            step = 1 if not trade.profit_booked_step1 else 2
+            monitor.trade.lots -= book_qty
+            if step == 1:
+                monitor.trade.profit_booked_step1 = True
+            else:
+                monitor.trade.profit_booked_step2 = True
+            _post(
+                f"🔒 *PROFIT BOOKED — step {step}*\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"Booked *{book_lots} lot(s)* off *STRANGLE {legs.ce_strike}/{legs.pe_strike}*\n"
+                f"💰 Locked: *{_fmt_pnl(locked_pnl)}*\n"
+                f"\n"
+                f"📌 *{monitor.trade.lots // NIFTY_LOT_SIZE} lot(s) still running*"
+                f"{' to EOD' if step == 2 else ''}\n"
+                f"━━━━━━━━━━━━━━━━━━━━"
+            )
+            logger.info(f"Profit-book step {step}: {book_lots} lot(s) each leg, {monitor.trade.lots} shares remaining")
+            journal_trade = replace(trade, lots=book_qty)
+            _record_trade_exit(journal_trade, ce_exit_ltp or pe_exit_ltp, None, locked_pnl, 0.0, locked_pnl, spot, "PROFIT_BOOK")
+        elif book_qty > 0:
             sd = (oc.call_data if opt_type == "CE" else oc.put_data).get(trade.strike)
             exit_ltp = sd.ltp if sd and sd.ltp > 0 else None
-            r = place_buy_order(kite, trade.symbol, lock_qty, price=_buy_price(oc, opt_type, trade.strike))
+            r = place_buy_order(kite, trade.symbol, book_qty, price=_buy_price(oc, opt_type, trade.strike))
             if not r.success:
-                send_error_alert(f"Partial profit lock order failed: {r.error}")
+                send_error_alert(f"Profit-book order failed: {r.error}")
             else:
-                locked_pnl = (trade.entry_premium - (exit_ltp or trade.entry_premium)) * lock_qty
-                monitor.trade.lots             = NIFTY_LOT_SIZE
-                monitor.trade.partial_profit_locked = True
-                locked_s   = f"₹{exit_ltp:.2f}" if exit_ltp else "~market"
+                locked_pnl = (trade.entry_premium - (exit_ltp or trade.entry_premium)) * book_qty
+                step = 1 if not trade.profit_booked_step1 else 2
+                monitor.trade.lots -= book_qty
+                if step == 1:
+                    monitor.trade.profit_booked_step1 = True
+                else:
+                    monitor.trade.profit_booked_step2 = True
+                locked_s = f"₹{exit_ltp:.2f}" if exit_ltp else "~market"
+                remaining_lots = monitor.trade.lots // NIFTY_LOT_SIZE
                 _post(
-                    f"🔒 *PARTIAL PROFIT LOCKED*\n"
+                    f"🔒 *PROFIT BOOKED — step {step}*\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"Exited *{lock_qty} shares* of {trade.action.replace('_',' ')} {trade.strike}\n"
+                    f"Exited *{book_lots} lot(s)* of {trade.action.replace('_',' ')} {trade.strike}\n"
                     f"Entry ₹{trade.entry_premium:.2f} → Exit *{locked_s}*\n"
                     f"💰 Locked: *{_fmt_pnl(locked_pnl)}*\n"
                     f"\n"
-                    f"📌 *1 lot ({NIFTY_LOT_SIZE} shares) still running free*\n"
-                    f"Will exit on 2 consecutive opposing signals or 2:55 PM.\n"
+                    f"📌 *{remaining_lots} lot(s) still running*{' to EOD' if step == 2 else ''}\n"
                     f"━━━━━━━━━━━━━━━━━━━━"
                 )
-                logger.info(f"Partial lock done: {lock_qty} exited @ {exit_ltp}, {NIFTY_LOT_SIZE} remaining")
-                journal_trade = replace(trade, lots=lock_qty)
-                _record_trade_exit(journal_trade, exit_ltp, None, locked_pnl, 0.0, locked_pnl, spot, "PARTIAL_PROFIT_LOCK")
+                logger.info(f"Profit-book step {step}: {book_lots} lot(s) exited @ {exit_ltp}, {monitor.trade.lots} shares remaining")
+                journal_trade = replace(trade, lots=book_qty)
+                _record_trade_exit(journal_trade, exit_ltp, None, locked_pnl, 0.0, locked_pnl, spot, "PROFIT_BOOK")
+        return   # skip send_management_alert at the bottom
+
+    elif decision.action == PYRAMID_ADD:
+        add_lots = decision.lots or 0
+        add_qty  = add_lots * NIFTY_LOT_SIZE
+        if add_qty <= 0:
+            return
+        if trade.action == "STRANGLE" and strangle_legs:
+            legs = strangle_legs
+            ce_add_prem = pe_add_prem = None
+            if legs.ce_active:
+                sd = oc.call_data.get(legs.ce_strike)
+                ce_add_prem = sd.ltp if sd and sd.ltp > 0 else None
+                if ce_add_prem:
+                    r = place_sell_order(kite, legs.ce_symbol, add_qty, price=ce_add_prem)
+                    if not r.success:
+                        send_error_alert(f"Pyramid CE add failed: {r.error}")
+                        ce_add_prem = None
+                    elif legs.hedge_ce_symbol:
+                        hp = _buy_price(oc, "CE", legs.hedge_ce_strike)
+                        place_buy_order(kite, legs.hedge_ce_symbol, add_qty, price=hp)
+            if legs.pe_active:
+                sd = oc.put_data.get(legs.pe_strike)
+                pe_add_prem = sd.ltp if sd and sd.ltp > 0 else None
+                if pe_add_prem:
+                    r = place_sell_order(kite, legs.pe_symbol, add_qty, price=pe_add_prem)
+                    if not r.success:
+                        send_error_alert(f"Pyramid PE add failed: {r.error}")
+                        pe_add_prem = None
+                    elif legs.hedge_pe_symbol:
+                        hp = _buy_price(oc, "PE", legs.hedge_pe_strike)
+                        place_buy_order(kite, legs.hedge_pe_symbol, add_qty, price=hp)
+            old_qty = trade.lots
+            if ce_add_prem is None or pe_add_prem is None:
+                # Both legs share a single trade.lots for exit sizing — if only one
+                # leg's add actually filled, bumping lots would understate what's
+                # short on one side and cause a wrong-sized buy-back later. Leave
+                # lots untouched and flag for manual reconciliation instead.
+                send_error_alert(
+                    f"⚠️ Pyramid add PARTIALLY filled on STRANGLE {legs.ce_strike}/{legs.pe_strike}: "
+                    f"CE={'OK' if ce_add_prem is not None else 'FAILED'}  PE={'OK' if pe_add_prem is not None else 'FAILED'}"
+                    f" — trade.lots NOT updated, please reconcile manually against broker positions."
+                )
+                if ce_add_prem is not None:
+                    legs.ce_entry_premium = (legs.ce_entry_premium * old_qty + ce_add_prem * add_qty) / (old_qty + add_qty)
+                if pe_add_prem is not None:
+                    legs.pe_entry_premium = (legs.pe_entry_premium * old_qty + pe_add_prem * add_qty) / (old_qty + add_qty)
+                monitor.trade.pyramid_confirm_count = 0
+                _save_state()
+                return
+            legs.ce_entry_premium = (legs.ce_entry_premium * old_qty + ce_add_prem * add_qty) / (old_qty + add_qty)
+            legs.pe_entry_premium = (legs.pe_entry_premium * old_qty + pe_add_prem * add_qty) / (old_qty + add_qty)
+            monitor.trade.lots = old_qty + add_qty
+            monitor.trade.entry_premium = legs.ce_entry_premium + legs.pe_entry_premium
+            monitor.trade.pyramid_confirm_count = 0
+            _post(
+                f"📈 *PYRAMID ADD*\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"Added *{add_lots} lot(s)* to *STRANGLE {legs.ce_strike}/{legs.pe_strike}*\n"
+                f"New size: *{monitor.trade.lots // NIFTY_LOT_SIZE} lot(s)* (cap {MAX_LOTS_STRANGLE_LEG})\n"
+                f"_{decision.reason}_\n"
+                f"━━━━━━━━━━━━━━━━━━━━"
+            )
+            logger.info(f"Pyramid add: +{add_lots} lot(s) each leg, now {monitor.trade.lots} shares")
+        else:
+            sd = (oc.call_data if opt_type == "CE" else oc.put_data).get(trade.strike)
+            add_prem = sd.ltp if sd and sd.ltp > 0 else None
+            if not add_prem:
+                logger.warning("Pyramid add skipped: no LTP available")
+                return
+            r = place_sell_order(kite, trade.symbol, add_qty, price=add_prem)
+            if not r.success:
+                send_error_alert(f"Pyramid add failed: {r.error}")
+                return
+            if trade.hedge_symbol and trade.hedge_strike:
+                hsd = (oc.call_data if opt_type == "CE" else oc.put_data).get(trade.hedge_strike)
+                hedge_price = hsd.ltp if hsd and hsd.ltp > 0 else _buy_price(oc, opt_type, trade.hedge_strike)
+                place_buy_order(kite, trade.hedge_symbol, add_qty, price=hedge_price)
+            old_qty = trade.lots
+            new_qty = old_qty + add_qty
+            monitor.trade.entry_premium = (trade.entry_premium * old_qty + add_prem * add_qty) / new_qty
+            monitor.trade.lots = new_qty
+            monitor.trade.pyramid_confirm_count = 0
+            _post(
+                f"📈 *PYRAMID ADD*\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"Added *{add_lots} lot(s)* to {trade.action.replace('_',' ')} {trade.strike} @ ₹{add_prem:.2f}\n"
+                f"New size: *{new_qty // NIFTY_LOT_SIZE} lot(s)*  Blended entry: ₹{monitor.trade.entry_premium:.2f} "
+                f"(cap {MAX_LOTS_DIRECTIONAL})\n"
+                f"_{decision.reason}_\n"
+                f"━━━━━━━━━━━━━━━━━━━━"
+            )
+            logger.info(f"Pyramid add: +{add_lots} lot(s) @ {add_prem}, now {new_qty} shares, blended entry {monitor.trade.entry_premium:.2f}")
+        _save_state()
         return   # skip send_management_alert at the bottom
 
     elif decision.action == EXIT_FULL:
@@ -938,7 +1113,14 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
         hedge_exit_ltp = None
         if qty > 0:
             if trade.action == "STRANGLE" and strangle_legs:
-                tag = "STRANGLE_TARGET" if decision.reason.startswith("Target hit") else "STRANGLE_SIGNAL_EXIT"
+                if decision.reason.startswith("Target hit"):
+                    tag = "STRANGLE_TARGET"
+                elif decision.reason.startswith("🛑 Daily loss breaker"):
+                    tag = "DAILY_LOSS_BREAKER"
+                elif decision.reason.startswith("EOD flatten"):
+                    tag = "EOD_FLATTEN"
+                else:
+                    tag = "STRANGLE_SIGNAL_EXIT"
                 if strangle_legs.ce_active:
                     sd = oc.call_data.get(strangle_legs.ce_strike)
                     ce_exit_ltp = sd.ltp if sd and sd.ltp > 0 else None
@@ -1004,16 +1186,25 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
                 (hedge_exit_ltp - trade.hedge_entry_premium) * qty
                 if hedge_exit_ltp is not None and trade.hedge_entry_premium is not None else 0.0
             )
-            _record_trade_exit(trade, exit_ltp, hedge_exit_ltp, main_pnl, hedge_pnl, main_pnl + hedge_pnl, spot, "SIGNAL_EXIT")
+            if decision.reason.startswith("🛑 Daily loss breaker"):
+                directional_tag = "DAILY_LOSS_BREAKER"
+            elif decision.reason.startswith("EOD flatten"):
+                directional_tag = "EOD_FLATTEN"
+            else:
+                directional_tag = "SIGNAL_EXIT"
+            _record_trade_exit(trade, exit_ltp, hedge_exit_ltp, main_pnl, hedge_pnl, main_pnl + hedge_pnl, spot, directional_tag)
             # Restrict same-direction re-entry: cool down for a few candles, then
-            # allow back only on a fresh STRONG signal (see the entry gate).
-            global _signal_exit_blocked, _signal_exit_cooldown
-            _signal_exit_blocked  = trade.action
-            _signal_exit_cooldown = REENTRY_COOLDOWN_CANDLES
-            logger.info(
-                f"Re-entry restricted: {trade.action} cooling down {REENTRY_COOLDOWN_CANDLES} "
-                f"candle(s) after SIGNAL_EXIT, then STRONG-only"
-            )
+            # allow back only on a fresh STRONG signal (see the entry gate). Not
+            # applied for the daily-loss breaker or EOD flatten — those already
+            # block (or don't need) further entries through other means.
+            if directional_tag == "SIGNAL_EXIT":
+                global _signal_exit_blocked, _signal_exit_cooldown
+                _signal_exit_blocked  = trade.action
+                _signal_exit_cooldown = REENTRY_COOLDOWN_CANDLES
+                logger.info(
+                    f"Re-entry restricted: {trade.action} cooling down {REENTRY_COOLDOWN_CANDLES} "
+                    f"candle(s) after SIGNAL_EXIT, then STRONG-only"
+                )
         monitor.clear_trade()
         strangle_legs = None
 
@@ -1134,10 +1325,8 @@ def run_scan():
             if _check_sl_hit(kite, trade, spot, oc=oc):
                 return
 
-            # Run monitor first — updates reversal_candle_count and other counters
-            mon_result = monitor.check(oc=oc, rsi=rsi_result, spot=spot)
-
-            # Current LTP of sold leg (for partial profit lock P&L calculation)
+            # Current LTP of sold leg (used by the daily-loss breaker, the
+            # profit-booking ladder, pyramiding, and position management below)
             opt_type_live = "CE" if trade.action == "CALL_SELL" else "PE"
             live_sd       = (oc.call_data if opt_type_live == "CE" else oc.put_data).get(trade.strike)
             current_ltp   = live_sd.ltp if live_sd and live_sd.ltp > 0 else None
@@ -1151,6 +1340,33 @@ def run_scan():
                 if strangle_legs.pe_active:
                     pe_sd = oc.put_data.get(strangle_legs.pe_strike)
                     strangle_pe_ltp = pe_sd.ltp if pe_sd and pe_sd.ltp > 0 else None
+
+            # ── Daily-loss hard stop ────────────────────────────────
+            # Force-close the algo's own open position the instant today's
+            # realised + unrealised P&L breaches -DAILY_MAX_LOSS, rather than
+            # letting it ride to its own point-based SL (which can be well
+            # past the cap at larger, pyramided lot sizes).
+            unrealised_now = _current_unrealised(trade, strangle_legs, current_ltp, strangle_ce_ltp, strangle_pe_ltp)
+            if unrealised_now is not None:
+                total_today = _day_realised_pnl + unrealised_now
+                if total_today <= -DAILY_MAX_LOSS:
+                    logger.warning(
+                        f"DAILY LOSS BREAKER: realised ₹{_day_realised_pnl:,.0f} + unrealised ₹{unrealised_now:,.0f} "
+                        f"= ₹{total_today:,.0f} <= -₹{DAILY_MAX_LOSS:,} — force-closing"
+                    )
+                    breach_reason = (
+                        f"🛑 Daily loss breaker: today's P&L ₹{total_today:,.0f} (realised "
+                        f"₹{_day_realised_pnl:,.0f} + unrealised ₹{unrealised_now:,.0f}) breached "
+                        f"-₹{DAILY_MAX_LOSS:,} — force-closing to protect capital"
+                    )
+                    breach_decision = ManagementDecision(
+                        action=EXIT_FULL, reason=breach_reason, reasons=[breach_reason], score=0,
+                    )
+                    _handle_management_decision(breach_decision, trade, spot, tl_result, rsi_result, opt_signal, oc, df)
+                    return
+
+            # Run monitor first — updates reversal_candle_count and other counters
+            mon_result = monitor.check(oc=oc, rsi=rsi_result, spot=spot)
 
             # Position manager: should we adjust/exit/reverse?
             pm_decision = evaluate_position(
@@ -1297,7 +1513,10 @@ def run_scan():
 def main():
     logger.info("Nifty Option Selling Bot starting...")
     logger.info(f"Entry: {ENTRY_START_HOUR:02d}:{ENTRY_START_MIN:02d} → {FORCE_EXIT_HOUR:02d}:{FORCE_EXIT_MIN:02d}")
-    logger.info("Strangles held overnight | Directionals: split exit 2:55 PM / 3:25 PM (single lot exits fully at 2:55 PM)")
+    logger.info(
+        f"EOD flatten: {EOD_FLATTEN_HOUR:02d}:{EOD_FLATTEN_MIN:02d} — directionals every day; "
+        f"strangles only the day before their own expiry, otherwise held overnight"
+    )
 
     start_command_listener()
     _restore_positions_from_kite()
@@ -1306,8 +1525,7 @@ def main():
     for minute in [":00", ":15", ":30", ":45"]:
         schedule.every().hour.at(minute).do(run_scan)
 
-    schedule.every().day.at("14:55").do(force_exit_all)
-    schedule.every().day.at("15:25").do(force_exit_remaining)
+    schedule.every().day.at(f"{EOD_FLATTEN_HOUR:02d}:{EOD_FLATTEN_MIN:02d}").do(eod_flatten)
 
     while True:
         schedule.run_pending()
