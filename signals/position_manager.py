@@ -49,6 +49,8 @@ logger = logging.getLogger(__name__)
 REVERSAL_THRESHOLD   = 3   # score needed to fully reverse into opposite directional trade
 SWITCH_THRESHOLD     = 3   # raised from 2 → 3: 2/3 opposing signals now just HOLDs,
                            # avoids excessive CALL↔PUT churn when market is ranging
+PYRAMID_MIN_SCORE    = 3   # STRONG only — pyramiding must clear a higher bar than a fresh
+                           # MODERATE entry (Aug 20: 2/3 was enough to triple size on ₹130 of "profit")
 
 
 @dataclass
@@ -272,10 +274,14 @@ def evaluate_position(
                     reasons=bear_reasons,
                 )
 
-            # ── Pyramid add: still genuinely range-bound and in profit ──
+            # ── Pyramid add: still genuinely range-bound AND a real cushion ──
+            # Requires unrealised >= PROFIT_LOCK_ARM_PNL, not just > 0 — a
+            # trivial paper profit isn't evidence the position has earned
+            # more risk (Aug 20: pyramided a directional trade on ₹130/₹663
+            # of "profit" and tripled the size right before it reversed).
             still_neutral = bull_score < SWITCH_THRESHOLD and bear_score < SWITCH_THRESHOLD
             if (
-                unrealised_strangle is not None and unrealised_strangle > 0
+                unrealised_strangle is not None and unrealised_strangle >= PROFIT_LOCK_ARM_PNL
                 and still_neutral
                 and current_lot_count < MAX_LOTS_STRANGLE_LEG
             ):
@@ -285,7 +291,7 @@ def evaluate_position(
                     return ManagementDecision(
                         action=PYRAMID_ADD, lots=add_lots,
                         reason=(
-                            f"Range-bound + in profit (₹{unrealised_strangle:,.0f}) for "
+                            f"Range-bound + cushioned (₹{unrealised_strangle:,.0f} ≥ ₹{PROFIT_LOCK_ARM_PNL:,}) for "
                             f"{trade.pyramid_confirm_count} candles — adding {add_lots} lot(s) to both legs "
                             f"(cap {MAX_LOTS_STRANGLE_LEG})"
                         ),
@@ -380,12 +386,19 @@ def evaluate_position(
                         score=0,
                     )
 
-        # ── Pyramid add: in profit + sustained same-direction confirmation ──
+        # ── Pyramid add: real cushion + STRONG sustained confirmation ──
         # For CALL_SELL, bear_score confirms (bearish = favourable); for PUT_SELL, bull_score.
+        # Gated on peak_unrealised (entry_lots basis, same bar that arms the trailing
+        # lock) rather than unrealised_now > 0 — a trivial paper profit isn't evidence
+        # the position has earned more risk, and peak_unrealised stays measured against
+        # the ORIGINAL starting size so a second add can't get progressively cheaper as
+        # lots grow. Also raised the score bar to STRONG (3/3): Aug 20 pyramided a
+        # directional trade on ₹130 then ₹663 of "profit" with just a 2/3 signal — the
+        # same bar as a fresh entry — and tripled the size right before it reversed.
         favourable_score = bear_score if trade.action == "CALL_SELL" else bull_score
         if (
-            unrealised_now > 0
-            and favourable_score >= MIN_SIGNAL_SCORE
+            trade.peak_unrealised >= PROFIT_LOCK_ARM_PNL
+            and favourable_score >= PYRAMID_MIN_SCORE
             and current_lot_count < MAX_LOTS_DIRECTIONAL
         ):
             trade.pyramid_confirm_count += 1
@@ -394,8 +407,9 @@ def evaluate_position(
                 return ManagementDecision(
                     action=PYRAMID_ADD, lots=add_lots,
                     reason=(
-                        f"In profit (₹{unrealised_now:,.0f}) with {favourable_score}/3 confirming for "
-                        f"{trade.pyramid_confirm_count} candles — adding {add_lots} lot(s) (cap {MAX_LOTS_DIRECTIONAL})"
+                        f"Cushioned (peak ₹{trade.peak_unrealised:,.0f} ≥ ₹{PROFIT_LOCK_ARM_PNL:,}) with STRONG "
+                        f"{favourable_score}/3 confirming for {trade.pyramid_confirm_count} candles — "
+                        f"adding {add_lots} lot(s) (cap {MAX_LOTS_DIRECTIONAL})"
                     ),
                     score=favourable_score,
                 )
