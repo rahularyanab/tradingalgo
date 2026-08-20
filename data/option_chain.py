@@ -90,9 +90,10 @@ def _fetch_with_retry(retries: int = 3) -> dict:
     raise Exception(f"Option chain fetch failed after {retries} attempts")
 
 
-def _get_weekly_expiry(expiries: list[str]) -> str:
+def _get_weekly_expiry(expiries: list[str], next_week: bool = False) -> str:
     """
-    Returns the nearest upcoming expiry.
+    Returns the nearest upcoming expiry, or the one after it when next_week=True
+    (used when this week's premium is too thin — see LOW_PREMIUM_THRESHOLD).
     On expiry day (Tuesday): skips today and returns NEXT week's expiry
     so we never trade same-day expiry options.
     """
@@ -111,13 +112,15 @@ def _get_weekly_expiry(expiries: list[str]) -> str:
                 continue
 
     parsed.sort()
-    for d, expiry_str in parsed:
-        if is_expiry and d == today:
-            continue          # skip today's expiry on expiry day
-        if d >= today:
-            return expiry_str
-
-    return expiries[0]
+    valid = [
+        expiry_str for d, expiry_str in parsed
+        if d >= today and not (is_expiry and d == today)
+    ]
+    if not valid:
+        return expiries[0]
+    if next_week:
+        return valid[1] if len(valid) > 1 else valid[0]
+    return valid[0]
 
 
 def _calculate_max_pain(call_oi: dict, put_oi: dict) -> int:
@@ -135,21 +138,23 @@ def _calculate_max_pain(call_oi: dict, put_oi: dict) -> int:
     return max_pain_s
 
 
-def fetch_option_chain(kite=None) -> Optional[OptionChainData]:
+def fetch_option_chain(kite=None, next_week: bool = False) -> Optional[OptionChainData]:
+    """next_week=True fetches the expiry AFTER the nearest one — used when the
+    nearest week's premium is too thin (see LOW_PREMIUM_THRESHOLD)."""
     try:
         data = _fetch_with_retry()
     except Exception as e:
         logger.error(f"Option chain fetch failed: {e}")
         if kite is not None:
             logger.info("NSE blocked — falling back to Kite option chain")
-            return _fetch_option_chain_from_kite(kite)
+            return _fetch_option_chain_from_kite(kite, next_week=next_week)
         return None
 
     try:
         records    = data["records"]
         spot_price = float(records["underlyingValue"])
         expiries   = records["expiryDates"]
-        weekly_exp = _get_weekly_expiry(expiries)
+        weekly_exp = _get_weekly_expiry(expiries, next_week=next_week)
 
         filtered = [
             r for r in records["data"]
@@ -278,25 +283,29 @@ def _get_nifty_instruments(kite) -> list:
     return nifty
 
 
-def _resolve_expiry(instruments: list) -> tuple:
-    """Return (expiry_date, nse_fmt_str). Skips today if today is an expiry day."""
+def _resolve_expiry(instruments: list, next_week: bool = False) -> tuple:
+    """Return (expiry_date, nse_fmt_str). Skips today if today is an expiry day.
+    next_week=True returns the expiry after the nearest one — used when this
+    week's premium is too thin (see LOW_PREMIUM_THRESHOLD)."""
     today = datetime.now().date()
     expiries = sorted(set(i["expiry"] for i in instruments))
-    for exp in expiries:
-        if exp == today:
-            continue      # never trade same-day expiry options
-        if exp > today:
-            return exp, exp.strftime("%d-%b-%Y")
-    return expiries[0], expiries[0].strftime("%d-%b-%Y")
+    valid = [exp for exp in expiries if exp > today]
+    if not valid:
+        return expiries[0], expiries[0].strftime("%d-%b-%Y")
+    if next_week:
+        exp = valid[1] if len(valid) > 1 else valid[0]
+    else:
+        exp = valid[0]
+    return exp, exp.strftime("%d-%b-%Y")
 
 
-def _fetch_option_chain_from_kite(kite) -> Optional[OptionChainData]:
+def _fetch_option_chain_from_kite(kite, next_week: bool = False) -> Optional[OptionChainData]:
     try:
         spot = float(kite.ltp(["NSE:NIFTY 50"])["NSE:NIFTY 50"]["last_price"])
         atm  = round(spot / 50) * 50
 
         nifty_insts  = _get_nifty_instruments(kite)
-        expiry_date, nse_expiry = _resolve_expiry(nifty_insts)
+        expiry_date, nse_expiry = _resolve_expiry(nifty_insts, next_week=next_week)
 
         # Build strike→symbol map from the instruments list (avoids format guessing)
         symbol_map: dict[tuple, str] = {}

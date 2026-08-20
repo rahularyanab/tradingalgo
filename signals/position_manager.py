@@ -282,6 +282,7 @@ def evaluate_position(
             still_neutral = bull_score < SWITCH_THRESHOLD and bear_score < SWITCH_THRESHOLD
             if (
                 unrealised_strangle is not None and unrealised_strangle >= PROFIT_LOCK_ARM_PNL
+                and not trade.pyramid_disabled
                 and still_neutral
                 and current_lot_count < MAX_LOTS_STRANGLE_LEG
             ):
@@ -397,7 +398,8 @@ def evaluate_position(
         # same bar as a fresh entry — and tripled the size right before it reversed.
         favourable_score = bear_score if trade.action == "CALL_SELL" else bull_score
         if (
-            trade.peak_unrealised >= PROFIT_LOCK_ARM_PNL
+            not trade.pyramid_disabled
+            and trade.peak_unrealised >= PROFIT_LOCK_ARM_PNL
             and favourable_score >= PYRAMID_MIN_SCORE
             and current_lot_count < MAX_LOTS_DIRECTIONAL
         ):

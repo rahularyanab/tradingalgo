@@ -99,6 +99,7 @@ class BacktestTrade:
     profit_booked_step1:   bool  = False
     profit_booked_step2:   bool  = False
     pyramid_confirm_count: int   = 0
+    pyramid_disabled:      bool  = False
 
     def __post_init__(self):
         if self.entry_lots == 0:

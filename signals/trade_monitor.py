@@ -49,6 +49,7 @@ class TradeState:
     profit_booked_step1:   bool            = False  # True once the ₹PROFIT_BOOK_STEP1_PNL ladder rung has fired
     profit_booked_step2:   bool            = False  # True once the ₹PROFIT_BOOK_STEP2_PNL ladder rung has fired
     pyramid_confirm_count: int             = 0      # consecutive in-profit + confirming candles toward a pyramid add
+    pyramid_disabled:      bool            = False  # True for a thin-premium entry next week didn't confirm — never pyramids
 
     def __post_init__(self):
         if self.entry_lots == 0:

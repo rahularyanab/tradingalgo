@@ -54,7 +54,7 @@ from config import (
     FRIDAY_STRANGLE_CUTOFF, STRANGLE_SL_BUFFER,
     NIFTY_LOT_SIZE, TOTAL_MTM_MAX_LOSS,
     DAILY_MAX_LOSS, REENTRY_COOLDOWN_CANDLES, MAX_SAME_DIR_REENTRIES,
-    MAX_LOTS_DIRECTIONAL, MAX_LOTS_STRANGLE_LEG,
+    MAX_LOTS_DIRECTIONAL, MAX_LOTS_STRANGLE_LEG, LOW_PREMIUM_THRESHOLD,
 )
 from execution.mtm_guard import is_paused as _mtm_guard_is_paused
 from data.market_data import get_kite_client, fetch_nifty_candles, get_current_nifty_price
@@ -122,6 +122,64 @@ def _current_unrealised(trade: TradeState, sl, current_ltp, strangle_ce_ltp, str
     if current_ltp is None:
         return None
     return (trade.entry_premium - current_ltp) * trade.lots
+
+
+def _apply_low_premium_fallback(kite, final, tl_result, rsi_result, spot):
+    """
+    In a low-VIX regime the near-week OTM premium can be too thin for the
+    gamma risk. If the candidate entry's premium is below LOW_PREMIUM_THRESHOLD,
+    try next week's expiry first (more time value at the same OTM distance =
+    higher premium, LOWER gamma, without moving the strike closer to spot).
+    Only switch if next week's OWN option-derived signals independently
+    confirm the same trade; otherwise stay on this week's cheap signal but
+    return pyramid_disabled=True, so a thin position can't scale up into an
+    Aug-20-style loss.
+    Returns (final_signal_to_use, pyramid_disabled).
+    """
+    if final.action not in ("CALL_SELL", "PUT_SELL", "STRANGLE"):
+        return final, False
+
+    if final.action == "STRANGLE":
+        thin = (final.call_premium or 0) < LOW_PREMIUM_THRESHOLD or (final.put_premium or 0) < LOW_PREMIUM_THRESHOLD
+    else:
+        thin = (final.premium or 0) < LOW_PREMIUM_THRESHOLD
+    if not thin:
+        return final, False
+
+    try:
+        oc_next = fetch_option_chain(kite=kite, next_week=True)
+    except Exception as e:
+        oc_next = None
+        logger.warning(f"Next-week option chain fetch failed: {e}")
+
+    if not oc_next:
+        logger.warning(
+            "Next-week option chain unavailable — staying on this week's signal, "
+            "pyramiding disabled for this trade"
+        )
+        return final, True
+
+    opt_next = analyse_option_signal(
+        oc=oc_next, trendline_resistance=tl_result.resistance_level,
+        trendline_support=tl_result.support_level,
+    )
+    final_next = combine_signals(
+        tl=tl_result, rsi=rsi_result, opt=opt_next,
+        spot_price=spot, expiry=oc_next.weekly_expiry_date,
+    )
+    if final_next.action == final.action:
+        logger.info(
+            f"Low premium (< ₹{LOW_PREMIUM_THRESHOLD}) — next week confirms "
+            f"{final_next.action}, switching to expiry {oc_next.weekly_expiry_date}"
+        )
+        return final_next, False
+
+    logger.info(
+        f"Low premium (< ₹{LOW_PREMIUM_THRESHOLD}) — next week does NOT confirm "
+        f"(would be {final_next.action}/{final_next.score}) — staying on this week's "
+        f"{final.action}, pyramiding disabled for this trade"
+    )
+    return final, True
 
 
 def _record_trade_exit(
@@ -279,6 +337,7 @@ def _save_state():
             "profit_booked_step1":   trade.profit_booked_step1,
             "profit_booked_step2":   trade.profit_booked_step2,
             "pyramid_confirm_count": trade.pyramid_confirm_count,
+            "pyramid_disabled":      trade.pyramid_disabled,
         }
         if trade.action == "STRANGLE" and strangle_legs:
             sl = strangle_legs
@@ -388,6 +447,7 @@ def _restore_positions_from_kite():
         profit_booked_step1    = t.get("profit_booked_step1", False),
         profit_booked_step2    = t.get("profit_booked_step2", False),
         pyramid_confirm_count  = t.get("pyramid_confirm_count", 0),
+        pyramid_disabled       = t.get("pyramid_disabled", False),
     ))
 
     sl = state.get("strangle_legs")
@@ -649,7 +709,7 @@ def _register_strangle(signal, spot, oc):
     )
 
 
-def _enter_strangle(kite, signal, qty: int, spot: float, oc) -> bool:
+def _enter_strangle(kite, signal, qty: int, spot: float, oc, pyramid_disabled: bool = False) -> bool:
     """
     Enter both strangle legs, buying each side's far-OTM margin hedge first
     when the signal found one (falls back to a naked sell for that side
@@ -686,6 +746,7 @@ def _enter_strangle(kite, signal, qty: int, spot: float, oc) -> bool:
             sl_put=signal.put_sl,
             expiry=signal.expiry,
             lots=qty,
+            pyramid_disabled=pyramid_disabled,
         ))
         _register_strangle(signal, spot, oc)
         _save_state()
@@ -1412,6 +1473,10 @@ def run_scan():
             )
             logger.info(f"Signal: {final.action}  score={final.score}/3  lots={final.lots}")
 
+            final, pyramid_disabled_flag = _apply_low_premium_fallback(
+                kite, final, tl_result, rsi_result, spot
+            )
+
             # Same-direction re-entry control after a SIGNAL_EXIT: cool down for a
             # few candles, then allow back only on a fresh STRONG (3/3) signal,
             # capped per direction per day. Everything else enters normally.
@@ -1456,6 +1521,7 @@ def run_scan():
                             hedge_symbol=hedge_sym,
                             hedge_strike=hedge_strike,
                             hedge_entry_premium=hedge_ltp,
+                            pyramid_disabled=pyramid_disabled_flag,
                         ))
                         if is_reentry:
                             _reentry_count[final.action] = _reentry_count.get(final.action, 0) + 1
@@ -1470,7 +1536,7 @@ def run_scan():
 
                 elif final.action == "STRANGLE" and _strangle_entry_allowed():
                     qty = final.strangle_lots * NIFTY_LOT_SIZE
-                    _enter_strangle(kite, final, qty, spot, oc)
+                    _enter_strangle(kite, final, qty, spot, oc, pyramid_disabled=pyramid_disabled_flag)
                     _signal_exit_blocked  = None
                     _signal_exit_cooldown = 0
 

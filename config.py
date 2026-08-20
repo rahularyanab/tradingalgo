@@ -125,6 +125,17 @@ PROFIT_BOOK_STEP_LOTS = 2        # lots booked at each ladder step
 REENTRY_COOLDOWN_CANDLES = 2     # candles to wait after a SIGNAL_EXIT before a same-direction re-entry
 MAX_SAME_DIR_REENTRIES   = 2     # max STRONG re-entries per direction per day
 
+# ── Low-premium expiry fallback ────────────────────────────────────
+# In a low-VIX regime, near-week OTM premium can be too thin to be worth the
+# gamma risk. If the chosen strike's premium is below this, try next week's
+# expiry first (more time value at the same OTM distance = higher premium,
+# LOWER gamma, without moving the strike closer to spot). If next week's own
+# option-derived signals don't independently confirm the same trade, fall
+# back to this week's cheap signal but with pyramiding disabled for that
+# trade — keeps something on screen without letting a thin-premium position
+# scale up into an Aug-20-style loss.
+LOW_PREMIUM_THRESHOLD = 50       # ₹ — below this, try next week's expiry first
+
 # ── Whole-account MTM guard (every open position, algo's own trade included) ──
 TOTAL_MTM_MAX_LOSS = 20000  # ₹ combined loss across ALL open positions → square off everything
 # Pause dates are no longer stored here — see execution/mtm_guard.py (JSON-backed,
