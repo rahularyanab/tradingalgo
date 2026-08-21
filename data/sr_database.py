@@ -264,6 +264,62 @@ def get_nearby_levels(
     return sorted(result, key=lambda l: abs(l.level - current_price))
 
 
+def find_levels_near(price: float, sr_type: Optional[str] = None) -> list[SRLevel]:
+    """All levels (broken or not) within CLUSTER_BAND of price, optionally
+    filtered by type. Used to disambiguate a manual /removesr with no type given."""
+    levels = _load()
+    return [
+        l for l in levels
+        if abs(l.level - price) <= CLUSTER_BAND
+        and (sr_type is None or l.sr_type == sr_type)
+    ]
+
+
+def add_level(price: float, sr_type: str, today: Optional[date] = None) -> SRLevel:
+    """
+    Manually add a level (e.g. from Telegram /addsr), or reinforce one
+    already nearby. Same lifecycle as an auto-detected level — a brand-new
+    one starts WEAK at touches=1 and strengthens if confirmed again later,
+    either by the bot's own detection or another manual add.
+    """
+    today     = today or date.today()
+    today_str = today.isoformat()
+    levels = _load()
+    match = _find_matching(levels, price, sr_type)   # active (non-broken) levels only
+    if match:
+        match.dates.append(today_str)
+        match.touches   = len(match.dates)
+        match.last_seen = today_str
+        _save(levels)
+        logger.info(f"SR manual reinforce: {sr_type} {match.level:.0f} touches={match.touches}")
+        return match
+
+    new_level = SRLevel(
+        level=round(price, 1), sr_type=sr_type, touches=1,
+        dates=[today_str], first_seen=today_str, last_seen=today_str,
+    )
+    levels.append(new_level)
+    _save(levels)
+    logger.info(f"SR manual add: {sr_type} {new_level.level:.0f}")
+    return new_level
+
+
+def remove_level(price: float, sr_type: str) -> Optional[SRLevel]:
+    """Delete the level nearest `price` of the given sr_type (within
+    CLUSTER_BAND, broken or not — a manual removal isn't the same thing as
+    the auto "broken by price action" tracking). Returns the removed level,
+    or None if nothing matched."""
+    levels = _load()
+    candidates = [l for l in levels if l.sr_type == sr_type and abs(l.level - price) <= CLUSTER_BAND]
+    if not candidates:
+        return None
+    match     = min(candidates, key=lambda l: abs(l.level - price))
+    remaining = [l for l in levels if l is not match]
+    _save(remaining)
+    logger.info(f"SR manual remove: {sr_type} {match.level:.0f}")
+    return match
+
+
 def summary() -> str:
     """Human-readable summary of the current database (for Telegram /sr command)."""
     levels = _load()

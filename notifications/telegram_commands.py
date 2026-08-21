@@ -2,9 +2,9 @@
 Telegram command listener — polls for incoming messages and responds.
 
 Supported commands (only from the configured TELEGRAM_CHAT_ID):
-  /logs [n]        — last n lines of the log file (default 30, max 60)
-  /errors          — recent ERROR/EXCEPTION lines from the log
-  /status          — last scan time, market open status
+  /sr                              — S/R level database
+  /addsr <price> <resistance|support>    — manually add/reinforce a level
+  /removesr <price> [resistance|support] — manually remove a level
   /pausemtm [date] — pause the whole-account MTM loss guard (default: tomorrow)
   /resumemtm       — clear all MTM guard pauses, re-arm immediately
   /pnl [YYYY-MM]   — daily P&L for the bot's own trades (default: this month)
@@ -15,9 +15,7 @@ import logging
 import os
 import threading
 import time
-from collections import deque
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import requests
 
@@ -33,10 +31,9 @@ _SET_COMMANDS_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setMyComm
 # Populates Telegram's "/" autocomplete menu — separate from the _handle()
 # dispatch below, so a new command must be added to both places.
 _BOT_COMMANDS = [
-    {"command": "logs",      "description": "Last n log lines (default 30, max 60)"},
-    {"command": "errors",    "description": "Recent ERROR / EXCEPTION lines"},
-    {"command": "status",    "description": "Last scan time + market status"},
     {"command": "sr",        "description": "S/R level database"},
+    {"command": "addsr",     "description": "Add/reinforce a level: <price> <resistance|support>"},
+    {"command": "removesr",  "description": "Remove a level: <price> [resistance|support]"},
     {"command": "pausemtm",  "description": "Pause MTM loss guard (default: tomorrow)"},
     {"command": "resumemtm", "description": "Clear all MTM guard pauses"},
     {"command": "pnl",       "description": "Daily P&L for bot trades (default: this month)"},
@@ -45,25 +42,16 @@ _BOT_COMMANDS = [
 
 _PROXY   = os.getenv("HTTPS_PROXY") or os.getenv("https_proxy")
 _PROXIES = {"https": _PROXY, "http": _PROXY} if _PROXY else None
-_MAX_LOG_LINES = 60
-_DEFAULT_LINES = 30
-
-# Detect which log file is in use (paper vs live)
-_LOG_CANDIDATES = ["logs/paper_trade.log", "logs/bot.log"]
 
 
-def _log_path() -> Path | None:
-    for candidate in _LOG_CANDIDATES:
-        p = Path(candidate)
-        if p.exists():
-            return p
+def _parse_sr_type(raw: str) -> str | None:
+    """'resistance'/'r' -> 'resistance', 'support'/'s' -> 'support', else None."""
+    raw = raw.lower()
+    if raw.startswith("r"):
+        return "resistance"
+    if raw.startswith("s"):
+        return "support"
     return None
-
-
-def _tail(path: Path, n: int) -> str:
-    """Return last n lines of a file efficiently."""
-    lines = deque(path.read_text(errors="replace").splitlines(), maxlen=n)
-    return "\n".join(lines)
 
 
 def _send(chat_id: str, text: str, plain: bool = False) -> None:
@@ -85,83 +73,82 @@ def _handle(text: str, chat_id: str) -> None:
     cmd  = text.split()[0].lower().split("@")[0]   # strip @botname suffix
     args = text.split()[1:]
 
-    log = _log_path()
-
     if cmd == "/help":
         _send(chat_id, (
             "*Bot commands:*\n"
-            "`/logs [n]` — last n log lines (default 30, max 60)\n"
-            "`/errors`   — recent ERROR / EXCEPTION lines\n"
-            "`/status`   — last scan time + market status\n"
             "`/sr`       — S/R level database (all tracked levels)\n"
+            "`/addsr <price> <resistance|support>` — add/reinforce a level\n"
+            "`/removesr <price> [resistance|support]` — remove a level\n"
             "`/pausemtm [today|tomorrow|YYYY-MM-DD]` — pause the ₹{:,} MTM loss guard (default: tomorrow)\n"
             "`/resumemtm` — clear all MTM guard pauses\n"
             "`/pnl [YYYY-MM]` — daily P&L for the bot's own trades (default: this month)\n"
             "`/help`     — this message"
         ).format(TOTAL_MTM_MAX_LOSS))
 
-    elif cmd == "/logs":
-        if not log:
-            _send(chat_id, "⚠️ Log file not found yet.")
-            return
-        try:
-            n = min(int(args[0]), _MAX_LOG_LINES) if args else _DEFAULT_LINES
-        except ValueError:
-            n = _DEFAULT_LINES
-        lines = _tail(log, n)
-        _send(chat_id, lines, plain=True)
-
-    elif cmd == "/errors":
-        if not log:
-            _send(chat_id, "⚠️ Log file not found yet.")
-            return
-        all_lines = log.read_text(errors="replace").splitlines()
-        # last 300 lines, filter for ERROR/EXCEPTION/Traceback
-        recent = all_lines[-300:]
-        error_lines = [
-            l for l in recent
-            if any(kw in l for kw in ("ERROR", "EXCEPTION", "Traceback", "exception"))
-        ]
-        if not error_lines:
-            _send(chat_id, "✅ No errors in the last 300 log lines.")
-        else:
-            out = "\n".join(error_lines[-40:])
-            _send(chat_id, out, plain=True)
-
-    elif cmd == "/status":
-        if not log:
-            _send(chat_id, "⚠️ Log file not found yet.")
-            return
-        all_lines = log.read_text(errors="replace").splitlines()
-        # Find the last scan line
-        scan_line = next(
-            (l for l in reversed(all_lines) if "Scan @" in l), None
-        )
-        signal_line = next(
-            (l for l in reversed(all_lines) if "Signal:" in l), None
-        )
-        now = datetime.now()
-        market_open = (
-            now.weekday() < 5
-            and (9 * 60 + 15) <= (now.hour * 60 + now.minute) <= (15 * 60 + 30)
-        )
-        market_str = "🟢 Market OPEN" if market_open else "🔴 Market CLOSED"
-
-        lines = [
-            f"*Bot Status* | {now.strftime('%H:%M IST %d %b')}",
-            "━━━━━━━━━━━━━━━━━━━━",
-            market_str,
-            f"Log: `{log}`",
-        ]
-        if scan_line:
-            lines.append(f"Last scan : `{scan_line[:80]}`")
-        if signal_line:
-            lines.append(f"Last signal: `{signal_line[:80]}`")
-        _send(chat_id, "\n".join(lines))
-
     elif cmd == "/sr":
         from data.sr_database import summary as sr_summary
         _send(chat_id, sr_summary())
+
+    elif cmd == "/addsr":
+        if len(args) < 2:
+            _send(chat_id, "Usage: `/addsr <price> <resistance|support>`\nExample: `/addsr 24500 resistance`")
+            return
+        try:
+            price = float(args[0])
+        except ValueError:
+            _send(chat_id, f"⚠️ Bad price `{args[0]}`.")
+            return
+        sr_type = _parse_sr_type(args[1])
+        if not sr_type:
+            _send(chat_id, f"⚠️ Bad type `{args[1]}` — use `resistance`/`r` or `support`/`s`.")
+            return
+        from data.sr_database import add_level
+        lvl = add_level(price, sr_type)
+        _send(chat_id, (
+            f"✅ *{sr_type.capitalize()} level added:* `{lvl.level:.0f}`\n"
+            f"{lvl.strength}  {lvl.unique_dates} date(s)  {lvl.touches} touch(es)"
+        ))
+
+    elif cmd == "/removesr":
+        if not args:
+            _send(chat_id, "Usage: `/removesr <price> [resistance|support]`\nExample: `/removesr 24500` or `/removesr 24500 resistance`")
+            return
+        try:
+            price = float(args[0])
+        except ValueError:
+            _send(chat_id, f"⚠️ Bad price `{args[0]}`.")
+            return
+
+        sr_type = None
+        if len(args) > 1:
+            sr_type = _parse_sr_type(args[1])
+            if not sr_type:
+                _send(chat_id, f"⚠️ Bad type `{args[1]}` — use `resistance`/`r` or `support`/`s`.")
+                return
+
+        from data.sr_database import find_levels_near, remove_level
+        if sr_type is None:
+            matches = find_levels_near(price)
+            types_found = {l.sr_type for l in matches}
+            if len(types_found) > 1:
+                lines = [f"⚠️ Multiple levels near `{price:.0f}` — specify type:"]
+                for l in matches:
+                    lines.append(f"  {'🔴' if l.sr_type == 'resistance' else '🟢'} `{l.level:.0f}` {l.sr_type}")
+                lines.append("Retry with `/removesr <price> resistance` or `/removesr <price> support`.")
+                _send(chat_id, "\n".join(lines))
+                return
+            if types_found:
+                sr_type = types_found.pop()
+
+        if sr_type is None:
+            _send(chat_id, f"No S/R level found near `{price:.0f}`.")
+            return
+
+        removed = remove_level(price, sr_type)
+        if removed:
+            _send(chat_id, f"🗑 *{sr_type.capitalize()} level removed:* `{removed.level:.0f}` (was {removed.strength}, {removed.touches} touches)")
+        else:
+            _send(chat_id, f"No {sr_type} level found near `{price:.0f}`.")
 
     elif cmd == "/pausemtm":
         arg = args[0].lower() if args else "tomorrow"

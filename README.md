@@ -56,7 +56,7 @@ python main.py                # live trading (real orders)
 
 ## Telegram bot
 
-When running, the bot sends trade alerts and supports basic commands (`/status`, `/logs`, `/errors`, `/help`) via a command listener thread.
+When running, the bot sends trade alerts and supports basic commands (`/sr`, `/addsr`, `/removesr`, `/pausemtm`, `/resumemtm`, `/pnl`, `/help`) via a command listener thread.
 
 ## Disclaimer
 
