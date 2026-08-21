@@ -72,84 +72,103 @@ def _fmt_coi(coi: float) -> str:
     return f"{arrow}{abs(int(coi))}"
 
 
+def _row_verdicts(sig: FinalSignal, trade_action: str) -> tuple:
+    """
+    Single source of truth for whether each of the 3 dashboard rows (RSI,
+    trendline, OI) is ALIGNED / AGAINST / None for a given trade direction.
+    Both _signal_dashboard (what's shown) and _trade_verdict (the headline)
+    call this — previously they computed this independently with mismatched
+    logic (an if/elif priority in the dashboard vs. an OR-based sum in the
+    verdict), so when the market genuinely had both a bullish- and
+    bearish-flavoured version of the same signal active at once (e.g. price
+    sitting near both a support AND a resistance cluster, or OI building on
+    both sides), the two could contradict each other — the dashboard would
+    show a row as AGAINST while the headline still claimed "3/3 aligned".
+    Returns (rsi_vs, tl_vs, oi_vs), each "ALIGNED" | "AGAINST" | None.
+    """
+    def _vs(flag_for_call_sell: bool, flag_for_put_sell: bool):
+        if flag_for_call_sell:
+            return "ALIGNED" if trade_action == "CALL_SELL" else ("AGAINST" if trade_action == "PUT_SELL" else None)
+        if flag_for_put_sell:
+            return "ALIGNED" if trade_action == "PUT_SELL" else ("AGAINST" if trade_action == "CALL_SELL" else None)
+        return None
+
+    rsi_vs = _vs(sig.bearish_divergence, sig.bullish_divergence)
+    tl_vs  = _vs(sig.at_resistance and sig.resistance_level, sig.at_support and sig.support_level)
+    oi_vs  = _vs(sig.call_bearish_pcr or sig.call_writing_bearish, sig.put_bullish_pcr or sig.put_writing_bullish)
+    return rsi_vs, tl_vs, oi_vs
+
+
 def _signal_dashboard(sig: FinalSignal, trade_action: str = "") -> str:
     """
     Three-row signal table. trade_action="" when no trade open.
     Returns multi-line string (no surrounding block — caller wraps it).
     """
+    rsi_vs, tl_vs, oi_vs = _row_verdicts(sig, trade_action)
+    _fmt_vs = lambda v: {"ALIGNED": "🟢 ALIGNED", "AGAINST": "🔴 AGAINST"}.get(v, "—")
+
     # ── RSI row ──────────────────────────────────────────────────
     if sig.bearish_divergence:
         price_arrow = "↑" if sig.spot_price >= sig.price_prev_pivot else "↓"
         rsi_icon   = "✅"
         rsi_label  = "RSI Diverge"
         rsi_detail = f"Bearish  RSI {sig.rsi_prev:.1f}→{sig.rsi_current:.1f} | price {price_arrow}{sig.price_prev_pivot:.0f}→{sig.spot_price:.0f}"
-        rsi_vs     = "🟢 ALIGNED" if trade_action == "CALL_SELL" else ("🔴 AGAINST" if trade_action == "PUT_SELL" else "")
     elif sig.bullish_divergence:
         price_arrow = "↓" if sig.spot_price <= sig.price_prev_pivot else "↑"
         rsi_icon   = "✅"
         rsi_label  = "RSI Diverge"
         rsi_detail = f"Bullish  RSI {sig.rsi_prev:.1f}→{sig.rsi_current:.1f} | price {price_arrow}{sig.price_prev_pivot:.0f}→{sig.spot_price:.0f}"
-        rsi_vs     = "🟢 ALIGNED" if trade_action == "PUT_SELL" else ("🔴 AGAINST" if trade_action == "CALL_SELL" else "")
     else:
         rsi_icon   = "❌"
         rsi_label  = "RSI Diverge"
         rsi_detail = f"None     RSI {sig.rsi_current:.1f}"
-        rsi_vs     = "—"
 
     # ── Trendline row ─────────────────────────────────────────────
     if sig.at_resistance and sig.resistance_level:
         tl_icon   = "✅"
         tl_label  = "Resistance "
         tl_detail = f"At {sig.resistance_level:.0f}  (price near from below)"
-        tl_vs     = "🟢 ALIGNED" if trade_action == "CALL_SELL" else ("🔴 AGAINST" if trade_action == "PUT_SELL" else "")
     elif sig.at_support and sig.support_level:
         tl_icon   = "✅"
         tl_label  = "Support    "
         tl_detail = f"At {sig.support_level:.0f}  (price near from above)"
-        tl_vs     = "🟢 ALIGNED" if trade_action == "PUT_SELL" else ("🔴 AGAINST" if trade_action == "CALL_SELL" else "")
     else:
         res_s = f"{sig.resistance_level:.0f}" if sig.resistance_level else "—"
         sup_s = f"{sig.support_level:.0f}"    if sig.support_level    else "—"
         tl_icon   = "❌"
         tl_label  = "Trendline  "
         tl_detail = f"None     Res {res_s} | Sup {sup_s}"
-        tl_vs     = "—"
 
     # ── OI / Writing row ──────────────────────────────────────────
     if sig.call_bearish_pcr:
         oi_icon   = "✅"
         oi_label  = "OI Signal  "
         oi_detail = f"Bearish  PCR {sig.pcr} (<0.8) | call wall {sig.call_wall}"
-        oi_vs     = "🟢 ALIGNED" if trade_action == "CALL_SELL" else ("🔴 AGAINST" if trade_action == "PUT_SELL" else "")
     elif sig.call_writing_bearish:
         oi_icon   = "✅"
         oi_label  = "OI Signal  "
         oi_detail = f"Call writing  Fresh COI at ATM strikes | wall {sig.call_wall}"
-        oi_vs     = "🟢 ALIGNED" if trade_action == "CALL_SELL" else ("🔴 AGAINST" if trade_action == "PUT_SELL" else "")
     elif sig.put_bullish_pcr:
         oi_icon   = "✅"
         oi_label  = "OI Signal  "
         oi_detail = f"Bullish  PCR {sig.pcr} (>1.2) | put wall {sig.put_wall}"
-        oi_vs     = "🟢 ALIGNED" if trade_action == "PUT_SELL" else ("🔴 AGAINST" if trade_action == "CALL_SELL" else "")
     elif sig.put_writing_bullish:
         oi_icon   = "✅"
         oi_label  = "OI Signal  "
         oi_detail = f"Put writing  Fresh COI at ATM strikes | wall {sig.put_wall}"
-        oi_vs     = "🟢 ALIGNED" if trade_action == "PUT_SELL" else ("🔴 AGAINST" if trade_action == "CALL_SELL" else "")
     else:
         oi_icon   = "❌"
         oi_label  = "OI Signal  "
         oi_detail = f"None     PCR {sig.pcr} (neutral 0.8–1.2)"
-        oi_vs     = "—"
 
     if trade_action:
         rows = [
             f"{rsi_icon} `{rsi_label}` {rsi_detail}",
-            f"   ↳ vs trade: *{rsi_vs}*",
+            f"   ↳ vs trade: *{_fmt_vs(rsi_vs)}*",
             f"{tl_icon} `{tl_label}` {tl_detail}",
-            f"   ↳ vs trade: *{tl_vs}*",
+            f"   ↳ vs trade: *{_fmt_vs(tl_vs)}*",
             f"{oi_icon} `{oi_label}` {oi_detail}",
-            f"   ↳ vs trade: *{oi_vs}*",
+            f"   ↳ vs trade: *{_fmt_vs(oi_vs)}*",
         ]
     else:
         rows = [
@@ -181,30 +200,50 @@ def _oi_table(sig: FinalSignal) -> str:
 
 
 def _trade_verdict(trade_action: str, sig: FinalSignal) -> str:
-    """Single-line verdict based on whether current signals support the open trade."""
-    if trade_action == "CALL_SELL":
-        aligned = sum([
-            sig.bearish_divergence,
-            sig.call_writing_bearish or sig.call_bearish_pcr,
-            sig.at_resistance,
-        ])
+    """
+    Single-line verdict based on whether current signals support the open
+    trade. Derived from _row_verdicts — the exact same per-row ALIGNED/
+    AGAINST/None determination the dashboard above just displayed — so this
+    headline can never claim "N/3 aligned" for a row the dashboard is
+    simultaneously showing as AGAINST.
+    """
+    if trade_action in ("CALL_SELL", "PUT_SELL"):
+        label = "bearish" if trade_action == "CALL_SELL" else "bullish"
+        rsi_vs, tl_vs, oi_vs = _row_verdicts(sig, trade_action)
+        aligned = sum(1 for v in (rsi_vs, tl_vs, oi_vs) if v == "ALIGNED")
 
         # 3/3 aligned → never show CAUTION regardless of minor counter-signals
+        # (can't happen alongside an AGAINST row any more — same source data)
         if aligned == 3:
             return (
-                f"✅ *HOLD WITH CONFIDENCE — 3/3 bearish signals active.*\n"
+                f"✅ *HOLD WITH CONFIDENCE — 3/3 {label} signals active.*\n"
                 f"_Trade thesis intact. Let premium decay._"
             )
 
         against = []
-        if sig.bullish_divergence:
-            against.append("bullish RSI divergence forming")
-        if sig.put_bullish_pcr:
-            against.append("PCR turning bullish")
-        # Only flag put writing when PCR has also turned bullish — raw writing alone
-        # can coexist with a bearish PCR (defensive hedging, not a bullish reversal)
-        if sig.put_writing_bullish and sig.put_bullish_pcr:
-            against.append("put writing + PCR turning bullish")
+        if rsi_vs == "AGAINST":
+            against.append(
+                "bullish RSI divergence forming" if trade_action == "CALL_SELL"
+                else "bearish RSI divergence forming"
+            )
+        if tl_vs == "AGAINST":
+            against.append(
+                f"price near support {sig.support_level:.0f}" if trade_action == "CALL_SELL" and sig.support_level
+                else (f"price near resistance {sig.resistance_level:.0f}" if sig.resistance_level else "price against trendline")
+            )
+        if oi_vs == "AGAINST":
+            if trade_action == "CALL_SELL":
+                # Only lead with put writing when PCR has also turned bullish — raw
+                # writing alone can coexist with a bearish PCR (defensive hedging).
+                against.append(
+                    "put writing + PCR turning bullish" if (sig.put_writing_bullish and sig.put_bullish_pcr)
+                    else ("PCR turning bullish" if sig.put_bullish_pcr else "put writing building")
+                )
+            else:
+                against.append(
+                    "call writing + PCR turning bearish" if (sig.call_writing_bearish and sig.call_bearish_pcr)
+                    else ("PCR turning bearish" if sig.call_bearish_pcr else "call writing building")
+                )
 
         if against:
             return (
@@ -213,53 +252,12 @@ def _trade_verdict(trade_action: str, sig: FinalSignal) -> str:
             )
         if aligned >= 2:
             return (
-                f"✅ *HOLD WITH CONFIDENCE — {aligned}/3 bearish signals active.*\n"
+                f"✅ *HOLD WITH CONFIDENCE — {aligned}/3 {label} signals active.*\n"
                 f"_Trade thesis intact. Let premium decay._"
             )
         if aligned == 1:
             return (
-                f"🟡 *HOLD — 1 bearish signal remains.*\n"
-                f"_No reversal yet but conviction lower. Watch SL closely._"
-            )
-        return (
-            f"🟡 *HOLD — Signals neutral.*\n"
-            f"_No exit trigger. Trade within risk parameters._"
-        )
-
-    if trade_action == "PUT_SELL":
-        aligned = sum([
-            sig.bullish_divergence,
-            sig.put_writing_bullish or sig.put_bullish_pcr,
-            sig.at_support,
-        ])
-
-        if aligned == 3:
-            return (
-                f"✅ *HOLD WITH CONFIDENCE — 3/3 bullish signals active.*\n"
-                f"_Trade thesis intact. Let premium decay._"
-            )
-
-        against = []
-        if sig.bearish_divergence:
-            against.append("bearish RSI divergence forming")
-        if sig.call_bearish_pcr:
-            against.append("PCR turning bearish")
-        if sig.call_writing_bearish and sig.call_bearish_pcr:
-            against.append("call writing + PCR turning bearish")
-
-        if against:
-            return (
-                f"⚠️ *CAUTION — {against[0]}.*\n"
-                f"_Signals shifting. Tighten SL or consider partial cover._"
-            )
-        if aligned >= 2:
-            return (
-                f"✅ *HOLD WITH CONFIDENCE — {aligned}/3 bullish signals active.*\n"
-                f"_Trade thesis intact. Let premium decay._"
-            )
-        if aligned == 1:
-            return (
-                f"🟡 *HOLD — 1 bullish signal remains.*\n"
+                f"🟡 *HOLD — 1 {label} signal remains.*\n"
                 f"_Watch SL closely._"
             )
         return (
