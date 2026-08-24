@@ -124,6 +124,35 @@ def _current_unrealised(trade: TradeState, sl, current_ltp, strangle_ce_ltp, str
     return (trade.entry_premium - current_ltp) * trade.lots
 
 
+def _fetch_oc_for_trade(kite, trade_expiry: str, oc_nearest=None):
+    """
+    Return the option chain matching `trade_expiry` — an open trade may be on
+    a different expiry than "current week" if it was entered via the
+    low-premium next-week fallback (_apply_low_premium_fallback). Reuses
+    `oc_nearest` if it already matches (avoids a redundant fetch); otherwise
+    fetches nearest week fresh, then next week.
+
+    Returns None if neither matches — callers MUST skip management for this
+    cycle rather than fall back to a mismatched chain: reading the wrong
+    week's chain at the same strike number returns a completely different
+    contract's premium, which is what silently corrupted P&L, the
+    profit-booking ladder, pyramiding, and worst of all priced a real exit
+    order off the wrong contract (Aug 24 incident — the order never filled).
+    """
+    oc = oc_nearest if oc_nearest is not None else fetch_option_chain(kite=kite)
+    if oc and oc.weekly_expiry_date == trade_expiry:
+        return oc
+    alt_oc = fetch_option_chain(kite=kite, next_week=True)
+    if alt_oc and alt_oc.weekly_expiry_date == trade_expiry:
+        return alt_oc
+    logger.error(
+        f"Could not fetch option chain matching expiry {trade_expiry} "
+        f"(nearest={oc.weekly_expiry_date if oc else 'fetch failed'}, "
+        f"next-week={alt_oc.weekly_expiry_date if alt_oc else 'fetch failed'})"
+    )
+    return None
+
+
 def _apply_low_premium_fallback(kite, final, tl_result, rsi_result, spot):
     """
     In a low-VIX regime the near-week OTM premium can be too thin for the
@@ -667,23 +696,31 @@ def eod_flatten():
             return
 
         logger.info(f"EOD flatten (day before expiry): STRANGLE {trade.strike}/{trade.expiry}")
-        oc_exit = None
-        if kite:
-            try:
-                oc_exit = fetch_option_chain(kite=kite)
-            except Exception:
-                oc_exit = None
+        oc_exit = _fetch_oc_for_trade(kite, trade.expiry) if kite else None
+        if oc_exit is None:
+            # This is a one-shot scheduled job, not a retrying scan loop — if we
+            # can't get the RIGHT chain, don't guess with the wrong one (that's
+            # exactly what mispriced the Aug 24 exit order). Alert loudly since
+            # there's no automatic next attempt today.
+            send_error_alert(
+                f"🚨 EOD flatten could NOT fetch the option chain matching STRANGLE "
+                f"{trade.strike}'s expiry {trade.expiry} — position was NOT closed. "
+                f"Manual action needed before close."
+            )
+            return
         reason = "EOD flatten — day before expiry (margin doesn't improve waiting for expiry day itself)"
         decision = ManagementDecision(action=EXIT_FULL, reason=reason, reasons=[reason], score=0)
         _handle_management_decision(decision, trade, spot, None, None, None, oc_exit, None)
         return
 
-    oc_exit = None
-    if kite:
-        try:
-            oc_exit = fetch_option_chain(kite=kite)
-        except Exception:
-            oc_exit = None
+    oc_exit = _fetch_oc_for_trade(kite, trade.expiry) if kite else None
+    if oc_exit is None:
+        send_error_alert(
+            f"🚨 EOD flatten could NOT fetch the option chain matching "
+            f"{trade.action} {trade.strike}'s expiry {trade.expiry} — position "
+            f"was NOT closed. Manual action needed before close."
+        )
+        return
 
     logger.info(f"EOD flatten: {trade.action} {trade.strike}")
     _close_directional_slice(trade, kite, spot, oc_exit, trade.lots,
@@ -1382,24 +1419,49 @@ def run_scan():
         if monitor.trade is not None:
             trade = monitor.trade
 
+            # An open trade may be on a DIFFERENT expiry than "current week" if
+            # it was entered via the low-premium next-week fallback (see
+            # _apply_low_premium_fallback). Every LTP/SL/exit-price lookup below
+            # must use the option chain matching the trade's ACTUAL contract —
+            # the same strike number on the wrong week is a completely different
+            # contract at a completely different price (Aug 24 incident: a
+            # "closed" position never actually filled at the broker because the
+            # buy-back was priced off the wrong week's much cheaper contract).
+            # If we can't get a matching chain, skip management entirely this
+            # scan rather than risk pricing off the wrong one — the next scan
+            # retries in 15 minutes.
+            trade_oc = _fetch_oc_for_trade(kite, trade.expiry, oc_nearest=oc)
+            if trade_oc is None:
+                send_error_alert(
+                    f"⚠️ Could not fetch option chain matching open {trade.action} "
+                    f"{trade.strike} (expiry {trade.expiry}) — skipping management "
+                    f"this scan rather than risk pricing off the wrong contract."
+                )
+                return
+            trade_opt = opt_signal if trade_oc is oc else analyse_option_signal(
+                oc=trade_oc,
+                trendline_resistance=tl_result.resistance_level,
+                trendline_support=tl_result.support_level,
+            )
+
             # Auto-exit if SL crossed (before position manager to avoid double processing)
-            if _check_sl_hit(kite, trade, spot, oc=oc):
+            if _check_sl_hit(kite, trade, spot, oc=trade_oc):
                 return
 
             # Current LTP of sold leg (used by the daily-loss breaker, the
             # profit-booking ladder, pyramiding, and position management below)
             opt_type_live = "CE" if trade.action == "CALL_SELL" else "PE"
-            live_sd       = (oc.call_data if opt_type_live == "CE" else oc.put_data).get(trade.strike)
+            live_sd       = (trade_oc.call_data if opt_type_live == "CE" else trade_oc.put_data).get(trade.strike)
             current_ltp   = live_sd.ltp if live_sd and live_sd.ltp > 0 else None
 
             # Current LTPs of both strangle legs (for the target-decay check)
             strangle_ce_ltp = strangle_pe_ltp = None
             if trade.action == "STRANGLE" and strangle_legs:
                 if strangle_legs.ce_active:
-                    ce_sd = oc.call_data.get(strangle_legs.ce_strike)
+                    ce_sd = trade_oc.call_data.get(strangle_legs.ce_strike)
                     strangle_ce_ltp = ce_sd.ltp if ce_sd and ce_sd.ltp > 0 else None
                 if strangle_legs.pe_active:
-                    pe_sd = oc.put_data.get(strangle_legs.pe_strike)
+                    pe_sd = trade_oc.put_data.get(strangle_legs.pe_strike)
                     strangle_pe_ltp = pe_sd.ltp if pe_sd and pe_sd.ltp > 0 else None
 
             # ── Daily-loss hard stop ────────────────────────────────
@@ -1423,18 +1485,18 @@ def run_scan():
                     breach_decision = ManagementDecision(
                         action=EXIT_FULL, reason=breach_reason, reasons=[breach_reason], score=0,
                     )
-                    _handle_management_decision(breach_decision, trade, spot, tl_result, rsi_result, opt_signal, oc, df)
+                    _handle_management_decision(breach_decision, trade, spot, tl_result, rsi_result, trade_opt, trade_oc, df)
                     return
 
             # Run monitor first — updates reversal_candle_count and other counters
-            mon_result = monitor.check(oc=oc, rsi=rsi_result, spot=spot)
+            mon_result = monitor.check(oc=trade_oc, rsi=rsi_result, spot=spot)
 
             # Position manager: should we adjust/exit/reverse?
             pm_decision = evaluate_position(
                 trade=trade,
                 tl=tl_result,
                 rsi=rsi_result,
-                opt=opt_signal,
+                opt=trade_opt,
                 strangle_legs=strangle_legs,
                 reversal_candle_count=monitor.reversal_candle_count,
                 clean_after_hedge_count=monitor.clean_after_hedge_count,
@@ -1447,7 +1509,7 @@ def run_scan():
             if pm_decision.action != HOLD:
                 _handle_management_decision(
                     pm_decision, trade, spot,
-                    tl_result, rsi_result, opt_signal, oc, df,
+                    tl_result, rsi_result, trade_opt, trade_oc, df,
                 )
             else:
                 if mon_result.has_warning:
@@ -1455,10 +1517,10 @@ def run_scan():
                     if sl_warnings:
                         send_trade_warning(trade, mon_result, spot)
                 final_sig = combine_signals(
-                    tl=tl_result, rsi=rsi_result, opt=opt_signal,
-                    spot_price=spot, expiry=oc.weekly_expiry_date,
+                    tl=tl_result, rsi=rsi_result, opt=trade_opt,
+                    spot_price=spot, expiry=trade_oc.weekly_expiry_date,
                 )
-                send_live_pnl_update(trade, spot, oc, signal=final_sig, strangle_legs=strangle_legs)
+                send_live_pnl_update(trade, spot, trade_oc, signal=final_sig, strangle_legs=strangle_legs)
 
             # If strangle has only one leg remaining, also check for entry of opposite
             if (monitor.trade and monitor.trade.action == "STRANGLE"
