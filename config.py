@@ -135,8 +135,3 @@ MAX_SAME_DIR_REENTRIES   = 2     # max STRONG re-entries per direction per day
 # trade — keeps something on screen without letting a thin-premium position
 # scale up into an Aug-20-style loss.
 LOW_PREMIUM_THRESHOLD = 50       # ₹ — below this, try next week's expiry first
-
-# ── Whole-account MTM guard (every open position, algo's own trade included) ──
-TOTAL_MTM_MAX_LOSS = 20000  # ₹ combined loss across ALL open positions → square off everything
-# Pause dates are no longer stored here — see execution/mtm_guard.py (JSON-backed,
-# controllable via the Telegram /pausemtm and /resumemtm commands).
