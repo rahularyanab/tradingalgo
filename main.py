@@ -411,14 +411,17 @@ def _restore_positions_from_kite():
         logger.error(f"Failed to read persisted trade state: {e}")
         return
 
-    if state.get("date") != datetime.now().strftime("%Y-%m-%d"):
-        logger.info("Persisted trade state is from a previous day — discarding.")
-        _STATE_FILE.unlink(missing_ok=True)
-        return
-
     t = state.get("trade")
     if not t:
+        # Nothing was open when this was saved — a stale empty file from a
+        # previous day is just clutter, safe to drop.
+        if state.get("date") != datetime.now().strftime("%Y-%m-%d"):
+            _STATE_FILE.unlink(missing_ok=True)
         return
+
+    # A real trade was open. Strangles (and any position held past EOD) are
+    # meant to survive day rollovers, so the calendar date alone must never
+    # discard one — only the live-position check below decides that.
 
     try:
         kite = _get_kite()
