@@ -844,6 +844,7 @@ def send_trade_journal_entry(
     total_pnl:      float,
     spot:           float,
     exit_reason:    str,
+    exit_detail:    Optional[str] = None,
 ) -> bool:
     time_s, date_s = _now_str()
     pnl_emoji = "✅" if total_pnl >= 0 else "❌"
@@ -860,6 +861,8 @@ def send_trade_journal_entry(
         "STRANGLE_SIGNAL_EXIT":"Signal-based full exit",
         "PROFIT_BOOK":          "Profit booked (ladder)",
         "DAILY_LOSS_BREAKER":  "Daily loss breaker",
+        "PROFIT_LOCK":          "📉 Trailing profit lock (gave back from peak)",
+        "SIGNAL_EXIT":          "⚡ Opposing signal — reversal exit",
     }
 
     entry_spot_s = f"{trade.entry_spot:.0f}" if trade.entry_spot > 0 else "—"
@@ -887,8 +890,12 @@ def send_trade_journal_entry(
         f"   {pnl_emoji} *Net P&L:  {_fmt(total_pnl)}*",
         f"",
         f"Exit: _{REASON_LABEL.get(exit_reason, exit_reason)}_",
+    ]
+    if exit_detail:
+        lines.append(f"`{exit_detail}`")
+    lines += [
         f"━━━━━━━━━━━━━━━━━━━━",
-        f"_Logged to trade\\_journal.csv_",
+        f"Logged to `trade_journal.csv`",
     ]
     return _post("\n".join(lines))
 

@@ -219,6 +219,7 @@ def _record_trade_exit(
     total_pnl: float,
     spot: float,
     exit_reason: str,
+    exit_detail: Optional[str] = None,
 ):
     """Append trade to CSV journal and send Telegram record."""
     # Accumulate today's realised P&L for the DAILY_MAX_LOSS breaker. The day
@@ -258,7 +259,8 @@ def _record_trade_exit(
     except Exception as e:
         logger.error(f"Journal write failed: {e}")
 
-    send_trade_journal_entry(trade, exit_ltp, hedge_exit_ltp, main_pnl, hedge_pnl, total_pnl, spot, exit_reason)
+    send_trade_journal_entry(trade, exit_ltp, hedge_exit_ltp, main_pnl, hedge_pnl, total_pnl, spot, exit_reason,
+                              exit_detail=exit_detail)
 
 
 def _buy_price(oc, opt_type: str, strike: int) -> Optional[float]:
@@ -1212,9 +1214,12 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
                 directional_tag = "DAILY_LOSS_BREAKER"
             elif decision.reason.startswith("EOD flatten"):
                 directional_tag = "EOD_FLATTEN"
+            elif decision.reason.startswith("Trailing profit lock"):
+                directional_tag = "PROFIT_LOCK"
             else:
                 directional_tag = "SIGNAL_EXIT"
-            _record_trade_exit(trade, exit_ltp, hedge_exit_ltp, main_pnl, hedge_pnl, main_pnl + hedge_pnl, spot, directional_tag)
+            _record_trade_exit(trade, exit_ltp, hedge_exit_ltp, main_pnl, hedge_pnl, main_pnl + hedge_pnl, spot,
+                                directional_tag, exit_detail=decision.reason)
             # Restrict same-direction re-entry: cool down for a few candles, then
             # allow back only on a fresh STRONG signal (see the entry gate). Not
             # applied for the daily-loss breaker or EOD flatten — those already
