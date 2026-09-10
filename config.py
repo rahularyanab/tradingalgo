@@ -68,12 +68,14 @@ ENTRY_START_HOUR   = 10
 ENTRY_START_MIN    = 0            # first entry only after 10:00 (avoids opening noise)
 FORCE_EXIT_HOUR    = 14
 FORCE_EXIT_MIN     = 55           # entry window closes at 14:55 — no new trades this late (unchanged)
-EOD_FLATTEN_HOUR   = 15           # 3:15 PM — single full flatten of whatever's open (directionals every
-EOD_FLATTEN_MIN    = 15           # day; strangles only the day before their own expiry). Replaces the old
-                                   # 2:55/3:25 split — the 3:25 leg sat 5 min from close, in the manipulation window.
-STRANGLE_CUTOFF_HOUR   = 14       # strangles allowed until 14:45 (overnight hold)
-STRANGLE_CUTOFF_MIN    = 45
-FRIDAY_STRANGLE_CUTOFF = 12       # no new strangles on Friday after 12:00 PM (gap risk)
+EOD_FLATTEN_HOUR   = 15           # 3:15 PM — single full flatten of whatever's open, every day, no
+EOD_FLATTEN_MIN    = 15           # exceptions (directionals AND strangles — purely intraday). Replaces
+                                   # the old 2:55/3:25 split — the 3:25 leg sat 5 min from close, in the manipulation window.
+STRANGLE_CUTOFF_HOUR   = 14       # strangles allowed until 14:45 — narrower than the 14:55 directional
+STRANGLE_CUTOFF_MIN    = 45       # cutoff; originally sized for overnight hold, now vestigial since
+                                   # strangles flatten same-day too (kept as-is, not requested to change)
+FRIDAY_STRANGLE_CUTOFF = 12       # no new strangles on Friday after 12:00 PM — originally weekend gap-risk
+                                   # (holding into Sat/Sun); moot now that strangles flatten same-day, kept as-is
 STRANGLE_SL_BUFFER     = 50       # same as directional (80 pts made losses bigger)
 
 # ── Lot sizing ────────────────────────────────────────────────────

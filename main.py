@@ -571,25 +571,13 @@ def _close_directional_slice(trade, kite, spot, oc_exit, exit_qty, tag, time_lab
     _save_state()
 
 
-def _parse_expiry_date(expiry_str: str):
-    """Parse trade.expiry ('%d-%b-%Y' or '%Y-%m-%d', matching the two formats
-    used elsewhere in the codebase) into a date. None if unparseable."""
-    for fmt in ("%d-%b-%Y", "%Y-%m-%d"):
-        try:
-            return datetime.strptime(expiry_str, fmt).date()
-        except ValueError:
-            continue
-    return None
-
-
 def eod_flatten():
     """
-    3:15 PM — single full flatten, replacing the old 2:55/3:25 split (which put
-    half the exit 5 minutes from close, in the manipulation-prone window).
-    Directionals close here every day. Strangles only close here the day
-    BEFORE their own expiry — margin gets worse, not better, on expiry day
-    itself, so waiting until then is counterproductive; on any other day a
-    strangle keeps holding overnight as before.
+    3:15 PM — single full flatten of whatever's open, directional or
+    strangle, every trading day. Purely intraday: nothing is ever carried
+    overnight, regardless of how close the position is to its own expiry.
+    Replaces the old 2:55/3:25 split (which put half the exit 5 minutes from
+    close, in the manipulation-prone window).
     """
     if monitor.trade is None:
         return
@@ -602,26 +590,7 @@ def eod_flatten():
         kite, spot = None, 0.0
 
     if trade.action == "STRANGLE":
-        expiry_date = _parse_expiry_date(trade.expiry)
-        is_day_before_expiry = expiry_date is not None and (expiry_date - datetime.now().date()).days == 1
-        if not is_day_before_expiry:
-            active_legs = []
-            if strangle_legs:
-                if strangle_legs.ce_active:
-                    active_legs.append(f"CE {strangle_legs.ce_strike}")
-                if strangle_legs.pe_active:
-                    active_legs.append(f"PE {strangle_legs.pe_strike}")
-            _post(
-                f"🌙 *STRANGLE — HOLDING OVERNIGHT*\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"Active legs: *{' + '.join(active_legs)}*\n"
-                f"Entry spot: `{trade.entry_spot:.1f}`  |  Now: `{spot:.1f}`\n"
-                f"Expiry: {trade.expiry}\n"
-                f"_SL and target monitoring continues tomorrow._"
-            )
-            return
-
-        logger.info(f"EOD flatten (day before expiry): STRANGLE {trade.strike}/{trade.expiry}")
+        logger.info(f"EOD flatten: STRANGLE {trade.strike}/{trade.expiry}")
         oc_exit = _fetch_oc_for_trade(kite, trade.expiry) if kite else None
         if oc_exit is None:
             # This is a one-shot scheduled job, not a retrying scan loop — if we
@@ -634,7 +603,7 @@ def eod_flatten():
                 f"Manual action needed before close."
             )
             return
-        reason = "EOD flatten — day before expiry (margin doesn't improve waiting for expiry day itself)"
+        reason = "EOD flatten — 3:15 PM (purely intraday, no overnight holds)"
         decision = ManagementDecision(action=EXIT_FULL, reason=reason, reasons=[reason], score=0)
         _handle_management_decision(decision, trade, spot, None, None, None, oc_exit, None)
         return
@@ -924,30 +893,68 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
     opt_type = "CE" if trade.action == "CALL_SELL" else "PE"
 
     if decision.action == EXIT_CE_LEG and strangle_legs:
+        exit_ltp = hedge_exit_ltp = None
         if strangle_legs.ce_active and qty > 0:
+            sd = oc.call_data.get(strangle_legs.ce_strike)
+            exit_ltp = sd.ltp if sd and sd.ltp > 0 else None
             ep = _buy_price(oc, "CE", strangle_legs.ce_strike)
             r = place_buy_order(kite, strangle_legs.ce_symbol, qty, price=ep)
             if not r.success:
                 send_error_alert(f"CE leg exit failed: {r.error}")
             if strangle_legs.hedge_ce_symbol:
+                hsd = oc.call_data.get(strangle_legs.hedge_ce_strike)
+                hedge_exit_ltp = hsd.ltp if hsd and hsd.ltp > 0 else None
                 hp = _sell_price(oc, "CE", strangle_legs.hedge_ce_strike)
                 hr = place_sell_order(kite, strangle_legs.hedge_ce_symbol, qty, price=hp)
                 if not hr.success:
                     send_error_alert(f"CE hedge unwind failed: {hr.error}")
+            main_pnl  = (strangle_legs.ce_entry_premium - (exit_ltp or strangle_legs.ce_entry_premium)) * qty
+            hedge_pnl = (
+                (hedge_exit_ltp - strangle_legs.hedge_ce_entry_premium) * qty
+                if hedge_exit_ltp is not None and strangle_legs.hedge_ce_entry_premium is not None else 0.0
+            )
+            ce_leg_trade = TradeState(
+                action="STRANGLE_CE", strike=strangle_legs.ce_strike, symbol=strangle_legs.ce_symbol,
+                entry_time=trade.entry_time, entry_premium=strangle_legs.ce_entry_premium,
+                entry_spot=trade.entry_spot, sl_spot_level=trade.sl_spot_level, expiry=trade.expiry,
+                lots=qty, hedge_symbol=strangle_legs.hedge_ce_symbol, hedge_strike=strangle_legs.hedge_ce_strike,
+                hedge_entry_premium=strangle_legs.hedge_ce_entry_premium,
+            )
+            _record_trade_exit(ce_leg_trade, exit_ltp, hedge_exit_ltp, main_pnl, hedge_pnl, main_pnl + hedge_pnl,
+                                spot, "STRANGLE_LEG_EXIT", exit_detail=decision.reason)
         strangle_legs.ce_active = False
         logger.info(f"CE leg {strangle_legs.ce_strike} closed. PE {strangle_legs.pe_strike} running.")
 
     elif decision.action == EXIT_PE_LEG and strangle_legs:
+        exit_ltp = hedge_exit_ltp = None
         if strangle_legs.pe_active and qty > 0:
+            sd = oc.put_data.get(strangle_legs.pe_strike)
+            exit_ltp = sd.ltp if sd and sd.ltp > 0 else None
             ep = _buy_price(oc, "PE", strangle_legs.pe_strike)
             r = place_buy_order(kite, strangle_legs.pe_symbol, qty, price=ep)
             if not r.success:
                 send_error_alert(f"PE leg exit failed: {r.error}")
             if strangle_legs.hedge_pe_symbol:
+                hsd = oc.put_data.get(strangle_legs.hedge_pe_strike)
+                hedge_exit_ltp = hsd.ltp if hsd and hsd.ltp > 0 else None
                 hp = _sell_price(oc, "PE", strangle_legs.hedge_pe_strike)
                 hr = place_sell_order(kite, strangle_legs.hedge_pe_symbol, qty, price=hp)
                 if not hr.success:
                     send_error_alert(f"PE hedge unwind failed: {hr.error}")
+            main_pnl  = (strangle_legs.pe_entry_premium - (exit_ltp or strangle_legs.pe_entry_premium)) * qty
+            hedge_pnl = (
+                (hedge_exit_ltp - strangle_legs.hedge_pe_entry_premium) * qty
+                if hedge_exit_ltp is not None and strangle_legs.hedge_pe_entry_premium is not None else 0.0
+            )
+            pe_leg_trade = TradeState(
+                action="STRANGLE_PE", strike=strangle_legs.pe_strike, symbol=strangle_legs.pe_symbol,
+                entry_time=trade.entry_time, entry_premium=strangle_legs.pe_entry_premium,
+                entry_spot=trade.entry_spot, sl_spot_level=trade.sl_spot_level, expiry=trade.expiry,
+                lots=qty, hedge_symbol=strangle_legs.hedge_pe_symbol, hedge_strike=strangle_legs.hedge_pe_strike,
+                hedge_entry_premium=strangle_legs.hedge_pe_entry_premium,
+            )
+            _record_trade_exit(pe_leg_trade, exit_ltp, hedge_exit_ltp, main_pnl, hedge_pnl, main_pnl + hedge_pnl,
+                                spot, "STRANGLE_LEG_EXIT", exit_detail=decision.reason)
         strangle_legs.pe_active = False
         logger.info(f"PE leg {strangle_legs.pe_strike} closed. CE {strangle_legs.ce_strike} running.")
 
@@ -1566,8 +1573,8 @@ def main():
     logger.info("Nifty Option Selling Bot starting...")
     logger.info(f"Entry: {ENTRY_START_HOUR:02d}:{ENTRY_START_MIN:02d} → {FORCE_EXIT_HOUR:02d}:{FORCE_EXIT_MIN:02d}")
     logger.info(
-        f"EOD flatten: {EOD_FLATTEN_HOUR:02d}:{EOD_FLATTEN_MIN:02d} — directionals every day; "
-        f"strangles only the day before their own expiry, otherwise held overnight"
+        f"EOD flatten: {EOD_FLATTEN_HOUR:02d}:{EOD_FLATTEN_MIN:02d} — everything flattens every day, "
+        f"purely intraday (directionals and strangles alike, no overnight holds)"
     )
 
     start_command_listener()
