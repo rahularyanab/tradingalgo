@@ -48,7 +48,7 @@ from config import (
     MARKET_CLOSE_HOUR, MARKET_CLOSE_MIN,
     ENTRY_START_HOUR, ENTRY_START_MIN,
     FORCE_EXIT_HOUR, FORCE_EXIT_MIN,
-    EOD_FLATTEN_HOUR, EOD_FLATTEN_MIN,
+    EOD_FLATTEN_HOUR, EOD_FLATTEN_MIN, EOD_FLATTEN_RETRY_AFTER_MIN,
     STRANGLE_CUTOFF_HOUR, STRANGLE_CUTOFF_MIN,
     FRIDAY_STRANGLE_CUTOFF, STRANGLE_SL_BUFFER,
     NIFTY_LOT_SIZE,
@@ -99,6 +99,15 @@ JOURNAL_FIELDS = [
 
 
 _EOD_LABEL = f"{EOD_FLATTEN_HOUR - 12}:{EOD_FLATTEN_MIN:02d} PM"   # derived from config so the text can't drift
+
+
+def _eod_flatten_times() -> list:
+    """['15:25', '15:27'] — the flatten and its one retry. The retry is capped
+    inside the session (market closes MARKET_CLOSE_HOUR:MIN)."""
+    first = EOD_FLATTEN_HOUR * 60 + EOD_FLATTEN_MIN
+    retry = min(first + EOD_FLATTEN_RETRY_AFTER_MIN, MARKET_CLOSE_HOUR * 60 + MARKET_CLOSE_MIN - 1)
+    times = [first] + ([retry] if retry > first else [])
+    return [f"{t // 60:02d}:{t % 60:02d}" for t in times]
 
 
 def _fmt_pnl(p: float) -> str:
@@ -741,14 +750,14 @@ def eod_flatten():
         logger.info(f"EOD flatten: STRANGLE {trade.strike}/{trade.expiry}")
         oc_exit = _fetch_oc_for_trade(kite, trade.expiry) if kite else None
         if oc_exit is None:
-            # This is a one-shot scheduled job, not a retrying scan loop — if we
-            # can't get the RIGHT chain, don't guess with the wrong one (that's
-            # exactly what mispriced the Aug 24 exit order). Alert loudly since
-            # there's no automatic next attempt today.
+            # If we can't get the RIGHT chain, don't guess with the wrong one (that's
+            # exactly what mispriced the Aug 24 exit order). Alert loudly; the
+            # scheduler runs this once more a couple of minutes later.
             send_error_alert(
                 f"🚨 EOD flatten could NOT fetch the option chain matching STRANGLE "
                 f"{trade.strike}'s expiry {trade.expiry} — position was NOT closed. "
-                f"Manual action needed before close."
+                f"The bot retries at {_eod_flatten_times()[-1]}; if you see this alert again, "
+                f"close it manually before the 15:30 close."
             )
             return
         reason = f"EOD flatten — {_EOD_LABEL} (purely intraday, no overnight holds)"
@@ -761,7 +770,8 @@ def eod_flatten():
         send_error_alert(
             f"🚨 EOD flatten could NOT fetch the option chain matching "
             f"{trade.action} {trade.strike}'s expiry {trade.expiry} — position "
-            f"was NOT closed. Manual action needed before close."
+            f"was NOT closed. The bot retries at {_eod_flatten_times()[-1]}; if you see "
+            f"this alert again, close it manually before the 15:30 close."
         )
         return
 
@@ -1992,7 +2002,7 @@ def main():
     logger.info("Nifty Option Selling Bot starting...")
     logger.info(f"Entry: {ENTRY_START_HOUR:02d}:{ENTRY_START_MIN:02d} → {FORCE_EXIT_HOUR:02d}:{FORCE_EXIT_MIN:02d}")
     logger.info(
-        f"EOD flatten: {EOD_FLATTEN_HOUR:02d}:{EOD_FLATTEN_MIN:02d} — everything flattens every day, "
+        f"EOD flatten: {' and retry '.join(_eod_flatten_times())} — everything flattens every day, "
         f"purely intraday (directionals and strangles alike, no overnight holds)"
     )
     logger.info(
@@ -2011,7 +2021,11 @@ def main():
     for minute in [":00", ":15", ":30", ":45"]:
         schedule.every().hour.at(minute).do(run_scan)
 
-    schedule.every().day.at(f"{EOD_FLATTEN_HOUR:02d}:{EOD_FLATTEN_MIN:02d}").do(eod_flatten)
+    # Flatten, plus one retry minutes later: eod_flatten is one-shot and a no-op when
+    # nothing is open, so the retry only matters if the first attempt couldn't get the
+    # right option chain (it then alerts and leaves the position open).
+    for t in _eod_flatten_times():
+        schedule.every().day.at(t).do(eod_flatten)
     schedule.every(GUARD_INTERVAL_SECONDS).seconds.do(guard_check)
 
     while True:

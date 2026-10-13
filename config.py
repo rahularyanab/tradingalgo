@@ -71,6 +71,8 @@ FORCE_EXIT_MIN     = 55           # entry window closes at 14:55 — no new trad
 EOD_FLATTEN_HOUR   = 15           # 3:25 PM — single full flatten of whatever's open, every day, no
 EOD_FLATTEN_MIN    = 25           # exceptions (directionals AND strangles — purely intraday). Was 3:15 until
                                    # 2026-10-14 (Rahul moved it later); market closes 15:30, so don't go past ~15:27.
+EOD_FLATTEN_RETRY_AFTER_MIN = 2   # second, identical flatten attempt this many minutes later (3:27). It is a
+                                   # no-op when nothing is open; it exists for a failed first attempt (chain fetch).
 STRANGLE_CUTOFF_HOUR   = 14       # strangles allowed until 14:45 — narrower than the 14:55 directional
 STRANGLE_CUTOFF_MIN    = 45       # cutoff; originally sized for overnight hold, now vestigial since
                                    # strangles flatten same-day too (kept as-is, not requested to change)
