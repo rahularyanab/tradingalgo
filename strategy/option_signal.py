@@ -52,6 +52,10 @@ class OptionSignal:
     # COI-based writing signals (independent of PCR)
     call_writing_bearish: bool = False  # fresh call OI building at near-ATM strikes
     put_writing_bullish:  bool = False  # fresh put OI building at near-ATM strikes
+    # Amounts behind those two flags (contracts of fresh OI at the nearby strikes) — display only,
+    # so the dashboard can say which side is actually writing more.
+    call_coi_nearby: float = 0.0
+    put_coi_nearby:  float = 0.0
     # Hedge legs — far OTM options to BUY for margin reduction
     hedge_call_strike: Optional[int]   = None   # far OTM CE to buy (~₹5-6)
     hedge_call_symbol: Optional[str]   = None
@@ -330,6 +334,8 @@ def analyse_option_signal(
         put_bullish=put_bullish,
         call_writing_bearish=call_writing_bearish,
         put_writing_bullish=put_writing_bullish,
+        call_coi_nearby=float(nearby_call_coi),
+        put_coi_nearby=float(nearby_put_coi),
         best_call_strike=best_call,
         best_put_strike=best_put,
         call_symbol=call_symbol,

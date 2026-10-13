@@ -16,7 +16,10 @@ from typing import Optional
 
 import requests
 
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from config import (
+    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, SL_BUFFER_POINTS,
+    DASH_OI_DOMINANCE_RATIO, DASH_SL_WARN_PTS, DASH_SL_PROGRESS_WARN, DASH_SL_PROGRESS_RISK,
+)
 from signals.combiner import FinalSignal
 from signals.trade_monitor import MonitorResult, TradeState
 
@@ -72,20 +75,68 @@ def _fmt_coi(coi: float) -> str:
     return f"{arrow}{abs(int(coi))}"
 
 
-def _row_verdicts(sig: FinalSignal, trade_action: str) -> tuple:
+def _trade_ctx(trade, spot: float, pnl: Optional[float] = None) -> Optional[dict]:
+    """What the dashboard needs to judge the signals against THIS trade rather
+    than against the market in general. Directional trades only.
+
+    thesis = the level the trade was built on (the SL sits SL_BUFFER_POINTS
+    beyond it). The dashboard used to keep showing "resistance: ALIGNED" using
+    whichever resistance is nearest above spot *now* — so once price broke the
+    trade's own level it silently switched to the next one up (Oct 13: 22681,
+    which was beyond the 22616 SL) and kept saying the thesis was intact."""
+    if trade.action not in ("CALL_SELL", "PUT_SELL") or not trade.sl_spot_level or not trade.entry_spot:
+        return None
+    sl, es = trade.sl_spot_level, trade.entry_spot
+    if trade.action == "CALL_SELL":
+        thesis, to_sl, adverse, sl_dist = sl - SL_BUFFER_POINTS, sl - spot, spot - es, sl - es
+    else:
+        thesis, to_sl, adverse, sl_dist = sl + SL_BUFFER_POINTS, spot - sl, es - spot, es - sl
+    return dict(
+        action=trade.action, spot=spot, sl=sl, thesis=thesis, to_sl=to_sl, pnl=pnl,
+        sl_progress=(adverse / sl_dist) if sl_dist > 0 else 0.0,
+    )
+
+
+def _oi_side(sig: FinalSignal) -> Optional[str]:
+    """Which way the OI evidence leans: "bear" | "bull" | "mixed" | None.
+
+    PCR extremes decide first. When BOTH sides have fresh writing (PCR
+    neutral) the bigger side wins only if it is DASH_OI_DOMINANCE_RATIO times
+    the other, otherwise it is genuinely mixed. Previously call writing was
+    tested first, so ANY call writing read as bearish/ALIGNED even when put
+    writing was several times larger (Oct 13 14:30: calls 161k vs puts 884k)."""
+    bear = sig.call_bearish_pcr or sig.call_writing_bearish
+    bull = sig.put_bullish_pcr or sig.put_writing_bullish
+    if bear and not bull:
+        return "bear"
+    if bull and not bear:
+        return "bull"
+    if not bear and not bull:
+        return None
+    if sig.call_bearish_pcr:
+        return "bear"
+    if sig.put_bullish_pcr:
+        return "bull"
+    c, p = sig.call_coi_nearby, sig.put_coi_nearby
+    if c > 0 and p > 0:
+        if p >= DASH_OI_DOMINANCE_RATIO * c:
+            return "bull"
+        if c >= DASH_OI_DOMINANCE_RATIO * p:
+            return "bear"
+    return "mixed"
+
+
+def _row_verdicts(sig: FinalSignal, trade_action: str, ctx: Optional[dict] = None) -> tuple:
     """
     Single source of truth for whether each of the 3 dashboard rows (RSI,
-    trendline, OI) is ALIGNED / AGAINST / None for a given trade direction.
-    Both _signal_dashboard (what's shown) and _trade_verdict (the headline)
-    call this — previously they computed this independently with mismatched
-    logic (an if/elif priority in the dashboard vs. an OR-based sum in the
-    verdict), so when the market genuinely had both a bullish- and
-    bearish-flavoured version of the same signal active at once (e.g. price
-    sitting near both a support AND a resistance cluster, or OI building on
-    both sides), the two could contradict each other — the dashboard would
-    show a row as AGAINST while the headline still claimed "3/3 aligned".
-    Returns (rsi_vs, tl_vs, oi_vs), each "ALIGNED" | "AGAINST" | None.
+    trendline, OI) is ALIGNED / AGAINST / MIXED / None for a given trade
+    direction. Both _signal_dashboard (what's shown) and _trade_verdict (the
+    headline) call this, so the headline can never claim "N/3 aligned" for a
+    row the dashboard is showing differently.
+    Returns (rsi_vs, tl_vs, oi_vs).
     """
+    directional = trade_action in ("CALL_SELL", "PUT_SELL")
+
     def _vs(flag_for_call_sell: bool, flag_for_put_sell: bool):
         if flag_for_call_sell:
             return "ALIGNED" if trade_action == "CALL_SELL" else ("AGAINST" if trade_action == "PUT_SELL" else None)
@@ -94,18 +145,40 @@ def _row_verdicts(sig: FinalSignal, trade_action: str) -> tuple:
         return None
 
     rsi_vs = _vs(sig.bearish_divergence, sig.bullish_divergence)
-    tl_vs  = _vs(sig.at_resistance and sig.resistance_level, sig.at_support and sig.support_level)
-    oi_vs  = _vs(sig.call_bearish_pcr or sig.call_writing_bearish, sig.put_bullish_pcr or sig.put_writing_bullish)
+
+    tl_vs = _vs(sig.at_resistance and sig.resistance_level, sig.at_support and sig.support_level)
+    if ctx and directional:
+        if trade_action == "CALL_SELL":
+            if ctx["spot"] > ctx["thesis"]:
+                tl_vs = "AGAINST"                       # through the level the trade was built on
+            elif tl_vs == "ALIGNED" and sig.resistance_level and sig.resistance_level > ctx["sl"]:
+                tl_vs = None                            # level is beyond the stop: SL hits first, it protects nothing
+        else:
+            if ctx["spot"] < ctx["thesis"]:
+                tl_vs = "AGAINST"
+            elif tl_vs == "ALIGNED" and sig.support_level and sig.support_level < ctx["sl"]:
+                tl_vs = None
+
+    side = _oi_side(sig)
+    if side == "mixed":
+        oi_vs = "MIXED" if directional else None
+    elif side == "bear":
+        oi_vs = "ALIGNED" if trade_action == "CALL_SELL" else ("AGAINST" if trade_action == "PUT_SELL" else None)
+    elif side == "bull":
+        oi_vs = "ALIGNED" if trade_action == "PUT_SELL" else ("AGAINST" if trade_action == "CALL_SELL" else None)
+    else:
+        oi_vs = None
     return rsi_vs, tl_vs, oi_vs
 
 
-def _signal_dashboard(sig: FinalSignal, trade_action: str = "") -> str:
+def _signal_dashboard(sig: FinalSignal, trade_action: str = "", ctx: Optional[dict] = None) -> str:
     """
-    Three-row signal table. trade_action="" when no trade open.
-    Returns multi-line string (no surrounding block — caller wraps it).
+    Three-row signal table. trade_action="" when no trade open. `ctx` (from
+    _trade_ctx) lets the rows be judged against the open trade's own level and
+    stop. Returns multi-line string (no surrounding block — caller wraps it).
     """
-    rsi_vs, tl_vs, oi_vs = _row_verdicts(sig, trade_action)
-    _fmt_vs = lambda v: {"ALIGNED": "🟢 ALIGNED", "AGAINST": "🔴 AGAINST"}.get(v, "—")
+    rsi_vs, tl_vs, oi_vs = _row_verdicts(sig, trade_action, ctx)
+    _fmt_vs = lambda v: {"ALIGNED": "🟢 ALIGNED", "AGAINST": "🔴 AGAINST", "MIXED": "🟡 MIXED"}.get(v, "—")
 
     # ── RSI row ──────────────────────────────────────────────────
     if sig.bearish_divergence:
@@ -139,26 +212,47 @@ def _signal_dashboard(sig: FinalSignal, trade_action: str = "") -> str:
         tl_label  = "Trendline  "
         tl_detail = f"None     Res {res_s} | Sup {sup_s}"
 
+    if ctx and trade_action == "CALL_SELL":
+        if ctx["spot"] > ctx["thesis"]:
+            tl_icon, tl_label = "⚠️", "Resistance "
+            tl_detail = (f"Trade level {ctx['thesis']:.0f} BROKEN — price {ctx['spot'] - ctx['thesis']:.0f} pts above"
+                         + (f" (next {sig.resistance_level:.0f} is beyond your SL)"
+                            if sig.resistance_level and sig.resistance_level > ctx["sl"] else ""))
+        elif sig.at_resistance and sig.resistance_level and sig.resistance_level > ctx["sl"]:
+            tl_icon = "⚠️"
+            tl_detail = f"At {sig.resistance_level:.0f} — beyond your SL {ctx['sl']:.0f}, so the SL hits first"
+    elif ctx and trade_action == "PUT_SELL":
+        if ctx["spot"] < ctx["thesis"]:
+            tl_icon, tl_label = "⚠️", "Support    "
+            tl_detail = (f"Trade level {ctx['thesis']:.0f} BROKEN — price {ctx['thesis'] - ctx['spot']:.0f} pts below"
+                         + (f" (next {sig.support_level:.0f} is beyond your SL)"
+                            if sig.support_level and sig.support_level < ctx["sl"] else ""))
+        elif sig.at_support and sig.support_level and sig.support_level < ctx["sl"]:
+            tl_icon = "⚠️"
+            tl_detail = f"At {sig.support_level:.0f} — beyond your SL {ctx['sl']:.0f}, so the SL hits first"
+
     # ── OI / Writing row ──────────────────────────────────────────
-    if sig.call_bearish_pcr:
-        oi_icon   = "✅"
-        oi_label  = "OI Signal  "
-        oi_detail = f"Bearish  PCR {sig.pcr} (<0.8) | call wall {sig.call_wall}"
-    elif sig.call_writing_bearish:
-        oi_icon   = "✅"
-        oi_label  = "OI Signal  "
-        oi_detail = f"Call writing  Fresh COI at ATM strikes | wall {sig.call_wall}"
-    elif sig.put_bullish_pcr:
-        oi_icon   = "✅"
-        oi_label  = "OI Signal  "
-        oi_detail = f"Bullish  PCR {sig.pcr} (>1.2) | put wall {sig.put_wall}"
-    elif sig.put_writing_bullish:
-        oi_icon   = "✅"
-        oi_label  = "OI Signal  "
-        oi_detail = f"Put writing  Fresh COI at ATM strikes | wall {sig.put_wall}"
+    side = _oi_side(sig)
+    c, p = sig.call_coi_nearby, sig.put_coi_nearby
+    both = f"calls {_fmt_oi(c)} vs puts {_fmt_oi(p)}" if (c > 0 or p > 0) else ""
+    oi_label = "OI Signal  "
+    if side == "mixed":
+        oi_icon   = "⚠️"
+        oi_detail = "Both sides writing" + (f"  {both}" if both else "")
+    elif side == "bear":
+        oi_icon = "✅"
+        if sig.call_bearish_pcr:
+            oi_detail = f"Bearish  PCR {sig.pcr} (<0.8) | call wall {sig.call_wall}"
+        else:
+            oi_detail = f"Call writing  {both if p > 0 else f'Fresh COI at ATM strikes | wall {sig.call_wall}'}"
+    elif side == "bull":
+        oi_icon = "✅"
+        if sig.put_bullish_pcr:
+            oi_detail = f"Bullish  PCR {sig.pcr} (>1.2) | put wall {sig.put_wall}"
+        else:
+            oi_detail = f"Put writing  {both if c > 0 else f'Fresh COI at ATM strikes | wall {sig.put_wall}'}"
     else:
         oi_icon   = "❌"
-        oi_label  = "OI Signal  "
         oi_detail = f"None     PCR {sig.pcr} (neutral 0.8–1.2)"
 
     if trade_action:
@@ -199,26 +293,46 @@ def _oi_table(sig: FinalSignal) -> str:
     )
 
 
-def _trade_verdict(trade_action: str, sig: FinalSignal) -> str:
+def _trade_verdict(trade_action: str, sig: FinalSignal, ctx: Optional[dict] = None) -> str:
     """
-    Single-line verdict based on whether current signals support the open
-    trade. Derived from _row_verdicts — the exact same per-row ALIGNED/
-    AGAINST/None determination the dashboard above just displayed — so this
-    headline can never claim "N/3 aligned" for a row the dashboard is
-    simultaneously showing as AGAINST.
+    Single-line verdict. Derived from _row_verdicts — the exact same per-row
+    determination the dashboard above just displayed. With `ctx` it is also
+    judged against the trade itself: how close the stop is, how far the trade
+    has travelled toward it, and whether price is through the level it was
+    built on. A "HOLD WITH CONFIDENCE" is only given when none of those are a
+    problem — previously it was issued purely from the signal rows, even at
+    -5K with the stop 20 points away.
     """
     if trade_action in ("CALL_SELL", "PUT_SELL"):
         label = "bearish" if trade_action == "CALL_SELL" else "bullish"
-        rsi_vs, tl_vs, oi_vs = _row_verdicts(sig, trade_action)
-        aligned = sum(1 for v in (rsi_vs, tl_vs, oi_vs) if v == "ALIGNED")
+        rsi_vs, tl_vs, oi_vs = _row_verdicts(sig, trade_action, ctx)
+        rows = (rsi_vs, tl_vs, oi_vs)
+        aligned = sum(1 for v in rows if v == "ALIGNED")
+        mixed   = any(v == "MIXED" for v in rows)
 
-        # 3/3 aligned → never show CAUTION regardless of minor counter-signals
-        # (can't happen alongside an AGAINST row any more — same source data)
-        if aligned == 3:
-            return (
-                f"✅ *HOLD WITH CONFIDENCE — 3/3 {label} signals active.*\n"
-                f"_Trade thesis intact. Let premium decay._"
+        if ctx:
+            pnl = ctx.get("pnl")
+            loss = f", down ₹{abs(pnl):,.0f}" if pnl is not None and pnl < 0 else ""
+            to_sl, prog = ctx["to_sl"], ctx["sl_progress"]
+            if to_sl <= 0:
+                return (
+                    f"🚨 *SL LEVEL REACHED — spot {ctx['spot']:.0f} is through your SL {ctx['sl']:.0f}{loss}.*\n"
+                    f"_The exit is being triggered._"
+                )
+            if to_sl <= DASH_SL_WARN_PTS or prog >= DASH_SL_PROGRESS_RISK:
+                return (
+                    f"🚨 *AT RISK — {to_sl:.0f} pts from your SL {ctx['sl']:.0f}{loss}.*\n"
+                    f"_This is the zone where trades get stopped out. Decide whether to step in before the stop does._"
+                )
+            broken = (
+                (trade_action == "CALL_SELL" and ctx["spot"] > ctx["thesis"])
+                or (trade_action == "PUT_SELL" and ctx["spot"] < ctx["thesis"])
             )
+            if broken:
+                return (
+                    f"⚠️ *CAUTION — price is through {ctx['thesis']:.0f}, the level this trade was built on{loss}.*\n"
+                    f"_The original setup no longer holds._"
+                )
 
         against = []
         if rsi_vs == "AGAINST":
@@ -249,6 +363,22 @@ def _trade_verdict(trade_action: str, sig: FinalSignal) -> str:
             return (
                 f"⚠️ *CAUTION — {against[0]}.*\n"
                 f"_Signals shifting. Tighten SL or consider partial cover._"
+            )
+        if mixed:
+            return (
+                f"🟡 *HOLD — option writing is mixed ({aligned}/3 {label} signals).*\n"
+                f"_Neither side clearly dominates. Watch SL closely._"
+            )
+        if ctx and ctx["sl_progress"] >= DASH_SL_PROGRESS_WARN:
+            return (
+                f"🟡 *HOLD, WATCH CLOSELY — {ctx['sl_progress'] * 100:.0f}% of the way to your SL "
+                f"({aligned}/3 {label} signals).*\n"
+                f"_Signals still support it, but price is moving against you._"
+            )
+        if aligned == 3:
+            return (
+                f"✅ *HOLD WITH CONFIDENCE — 3/3 {label} signals active.*\n"
+                f"_Trade thesis intact. Let premium decay._"
             )
         if aligned >= 2:
             return (
@@ -609,9 +739,9 @@ def send_trade_warning(
         lines += [
             "",
             f"*SIGNAL CHECK — vs your {trade.action.replace('_',' ')}*",
-            _signal_dashboard(signal, trade_action=trade.action),
+            _signal_dashboard(signal, trade_action=trade.action, ctx=_trade_ctx(trade, spot)),
             "",
-            _trade_verdict(trade.action, signal),
+            _trade_verdict(trade.action, signal, _trade_ctx(trade, spot)),
         ]
     else:
         lines += [
@@ -821,12 +951,13 @@ def send_live_pnl_update(
     ]
 
     if signal:
+        ctx = _trade_ctx(trade, spot, total_pnl)
         lines += [
             "",
             f"*SIGNAL CHECK — vs your {trade.action.replace('_', ' ')}*",
-            _signal_dashboard(signal, trade_action=trade.action),
+            _signal_dashboard(signal, trade_action=trade.action, ctx=ctx),
             "",
-            _trade_verdict(trade.action, signal),
+            _trade_verdict(trade.action, signal, ctx),
         ]
 
     lines.append("━━━━━━━━━━━━━━━━━━━━")

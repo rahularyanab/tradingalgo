@@ -125,6 +125,12 @@ PROTECTED_MAX_LOTS  = 2          # protected mode: cap on lots for any NEW trade
                                   # under the floor — see _protected_lots in main.py)
 PROTECTED_DELTA_EST = 0.6        # rough option delta used to estimate the loss per lot at the SL
 
+# ── Telegram dashboard wording (display only — never affects entries or exits) ──
+DASH_OI_DOMINANCE_RATIO = 1.5    # one side's fresh writing must be this many times the other's to "win" the OI row
+DASH_SL_WARN_PTS        = 30     # within this many spot points of the SL → "AT RISK"
+DASH_SL_PROGRESS_WARN   = 0.5    # fraction of the entry→SL distance already travelled → "watch closely"
+DASH_SL_PROGRESS_RISK   = 0.7    # … → "AT RISK"
+
 # ── Late-day size cut ──────────────────────────────────────────────
 # History (99 live entries): trades opened from 14:00 had a median loss and a
 # profit factor under 0.5, while the day's money is made in the morning. New

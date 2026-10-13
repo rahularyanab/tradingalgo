@@ -88,6 +88,8 @@ class FinalSignal:
     put_bullish_pcr:      bool          = False   # PCR > 1.2
     resistance_level:     Optional[float] = None
     support_level:        Optional[float] = None
+    call_coi_nearby:      float           = 0.0     # fresh call OI at nearby strikes (display only)
+    put_coi_nearby:       float           = 0.0     # fresh put OI at nearby strikes (display only)
 
 
 def _strangle_conditions_met(
@@ -147,6 +149,8 @@ def combine_signals(
         put_bullish_pcr=opt.put_bullish,
         resistance_level=tl.resistance_level,
         support_level=tl.support_level,
+        call_coi_nearby=opt.call_coi_nearby,
+        put_coi_nearby=opt.put_coi_nearby,
     )
 
     _common = dict(
