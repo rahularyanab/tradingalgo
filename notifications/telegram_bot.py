@@ -865,6 +865,7 @@ def send_trade_journal_entry(
         "SIGNAL_EXIT":          "⚡ Opposing signal — reversal exit",
         "STRANGLE_LEG_EXIT":    "⚡ Single leg closed — signal against it, other leg still running",
         "MANUAL_EXIT":          "🖐 Manual exit (placed outside the bot)",
+        "DAY_PROFIT_LOCK":      "🔒 Day profit-lock floor — closed so the day stays green",
     }
 
     entry_spot_s = f"{trade.entry_spot:.0f}" if trade.entry_spot > 0 else "—"

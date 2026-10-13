@@ -112,6 +112,25 @@ DAILY_MAX_LOSS           = 5000  # ₹ daily hard stop (realised + unrealised) �
 PROFIT_LOCK_ARM_PNL      = 1500  # ₹ unrealised (at entry lot size) to arm the trailing lock
 PROFIT_LOCK_GIVEBACK_PCT = 0.35  # exit if unrealised retraces this fraction from its peak once armed
 
+# ── Day-profit protection ──────────────────────────────────────────
+# Once the algo has BANKED this much realised profit today, the rest of the
+# day runs "protected": smaller size, no pyramiding, and the day's P&L
+# (realised + unrealised) is not allowed to fall below DAY_PROFIT_FLOOR —
+# i.e. the stop-loss on everything after that is simply the profit already
+# banked. Below the arm level nothing changes (normal sizing, normal
+# DAILY_MAX_LOSS). Latches for the rest of the day once armed.
+DAY_PROFIT_ARM_PNL  = 2500       # ₹ realised today that arms protected mode
+DAY_PROFIT_FLOOR    = 0          # ₹ protected mode: day P&L may not fall below this (0 = stay green)
+PROTECTED_MAX_LOTS  = 2          # protected mode: cap on lots for any NEW trade (reduced to 1 if 2 won't fit
+                                  # under the floor — see _protected_lots in main.py)
+PROTECTED_DELTA_EST = 0.6        # rough option delta used to estimate the loss per lot at the SL
+
+# ── Intra-scan guard ───────────────────────────────────────────────
+# Scans run every 15 min; between them the bot used to be blind, so a spot
+# move through the SL was only acted on at the next scan (Oct 13: crossed at
+# 14:32, exit at 14:45). The guard re-checks the open position this often.
+GUARD_INTERVAL_SECONDS = 60
+
 # ── Profit-booking ladder ──────────────────────────────────────────
 # Replaces the old single-shot "cut to 1 lot at ₹5000" partial lock with
 # staged booking; the trailing lock above still protects whatever's left

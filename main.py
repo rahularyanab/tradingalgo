@@ -55,6 +55,8 @@ from config import (
     NIFTY_LOT_SIZE,
     DAILY_MAX_LOSS, REENTRY_COOLDOWN_CANDLES, MAX_SAME_DIR_REENTRIES,
     MAX_LOTS_DIRECTIONAL, MAX_LOTS_STRANGLE_LEG, LOW_PREMIUM_THRESHOLD,
+    DAY_PROFIT_ARM_PNL, DAY_PROFIT_FLOOR, PROTECTED_MAX_LOTS, PROTECTED_DELTA_EST,
+    GUARD_INTERVAL_SECONDS,
 )
 from data.market_data import get_kite_client, fetch_nifty_candles, get_current_nifty_price
 from data.option_chain import fetch_option_chain
@@ -226,6 +228,7 @@ def _record_trade_exit(
     # rollover reset lives in run_scan(), so here we only add.
     global _day_realised_pnl
     _day_realised_pnl += total_pnl
+    _update_day_lock()
 
     now = datetime.now()
     row = {
@@ -292,6 +295,9 @@ _reentry_count: dict                  = {"CALL_SELL": 0, "PUT_SELL": 0}  # STRON
 _day_realised_pnl: float              = 0.0     # cumulative realised P&L today — drives the DAILY_MAX_LOSS breaker
 _day_pnl_reset_date = None       # last date _day_realised_pnl was reset — detects day rollover
 _day_loss_alerted: bool = False  # True once the daily-loss breaker has alerted for the day (avoids spamming)
+_day_profit_locked: bool = False  # True once today's realised P&L has reached DAY_PROFIT_ARM_PNL (latched for the day)
+_ext_close_strikes: dict = {}    # trade key -> consecutive checks that found it flat at the broker (manual close)
+_guard_alerted: set = set()      # one-shot alert keys for the intra-scan guard (avoids a message per minute)
 
 
 def _get_kite():
@@ -328,6 +334,99 @@ def _strangle_entry_allowed() -> bool:
     return now_mins < STRANGLE_CUTOFF_HOUR * 60 + STRANGLE_CUTOFF_MIN
 
 
+# ── Day-profit protection ──────────────────────────────────────────────────────
+
+def _day_floor() -> float:
+    """Lowest day P&L (realised + unrealised) the algo tolerates before it
+    force-closes and stops entering. Normally -DAILY_MAX_LOSS; once protected
+    mode is armed it is DAY_PROFIT_FLOOR (0 = never let a banked profit turn
+    into a loss)."""
+    return DAY_PROFIT_FLOOR if _day_profit_locked else -DAILY_MAX_LOSS
+
+
+def _update_day_lock():
+    """Arm protected mode the moment today's realised P&L reaches
+    DAY_PROFIT_ARM_PNL. Latches for the rest of the day."""
+    global _day_profit_locked
+    if _day_profit_locked or _day_realised_pnl < DAY_PROFIT_ARM_PNL:
+        return
+    _day_profit_locked = True
+    if monitor.trade is not None:
+        monitor.trade.pyramid_disabled = True      # no scaling up an already-open trade either
+    logger.info(
+        f"PROFIT LOCK armed: realised ₹{_day_realised_pnl:,.0f} >= ₹{DAY_PROFIT_ARM_PNL:,} — "
+        f"max {PROTECTED_MAX_LOTS} lot(s) per trade, no pyramiding, day floor ₹{DAY_PROFIT_FLOOR:,}"
+    )
+    _post(
+        f"🔒 *PROFIT LOCK ARMED*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Booked today: *{_fmt_pnl(_day_realised_pnl)}*  (arm level ₹{DAY_PROFIT_ARM_PNL:,})\n"
+        f"For the rest of the day:\n"
+        f"• new trades capped at *{PROTECTED_MAX_LOTS} lots* (1 if 2 won't fit under the floor)\n"
+        f"• no pyramiding\n"
+        f"• everything closes if today's P&L falls to *₹{DAY_PROFIT_FLOOR:,}* — the stop-loss is the profit already banked"
+    )
+    _save_state()
+
+
+def _protected_lots(requested_lots: int, sl_distance_pts: float) -> int:
+    """Lots allowed for a NEW trade. Normal mode: unchanged. Protected mode:
+    at most PROTECTED_MAX_LOTS, and reduced (down to 1) until the estimated
+    loss at the SL fits inside today's banked profit — so one stop-out
+    cannot take the day below the floor."""
+    if not _day_profit_locked:
+        return requested_lots
+    lots   = max(1, min(requested_lots, PROTECTED_MAX_LOTS))
+    cushion = _day_realised_pnl - DAY_PROFIT_FLOOR
+    loss_per_lot = max(sl_distance_pts, 1.0) * PROTECTED_DELTA_EST * NIFTY_LOT_SIZE
+    while lots > 1 and lots * loss_per_lot > cushion:
+        lots -= 1
+    return lots
+
+
+def _apply_profit_lock_sizing(final, spot: float, pyramid_disabled: bool):
+    """Shrink the signal's lot count in protected mode (mutates `final` so the
+    Telegram signal message shows the size that is really being traded) and
+    switch pyramiding off for the new trade. No-op in normal mode."""
+    if not _day_profit_locked or final.action not in ("CALL_SELL", "PUT_SELL", "STRANGLE"):
+        return final, pyramid_disabled
+
+    if final.action == "CALL_SELL":
+        dist = (final.sl_spot_level or spot) - spot
+    elif final.action == "PUT_SELL":
+        dist = spot - (final.sl_spot_level or spot)
+    else:
+        dist = max((final.call_sl or spot) - spot, spot - (final.put_sl or spot))
+
+    attr = "strangle_lots" if final.action == "STRANGLE" else "lots"
+    cur  = getattr(final, attr)
+    new  = _protected_lots(cur, dist)
+    if new != cur:
+        setattr(final, attr, new)
+        note = f"🔒 Profit-lock mode: sized {new} lot(s) instead of {cur} (day banked ₹{_day_realised_pnl:,.0f})"
+        final.reasons.append(note)
+        logger.info(note)
+    return final, True
+
+
+def _floor_breach_decision(total_today: float, unrealised_now: float) -> ManagementDecision:
+    """EXIT_FULL decision for 'day P&L hit its floor' — the daily-loss breaker
+    in normal mode, the profit-lock floor in protected mode."""
+    if _day_profit_locked:
+        reason = (
+            f"🔒 Day profit-lock: today's P&L ₹{total_today:,.0f} (banked ₹{_day_realised_pnl:,.0f} "
+            f"+ open ₹{unrealised_now:,.0f}) fell to the ₹{DAY_PROFIT_FLOOR:,} floor — "
+            f"closing so the day doesn't turn negative"
+        )
+    else:
+        reason = (
+            f"🛑 Daily loss breaker: today's P&L ₹{total_today:,.0f} (realised "
+            f"₹{_day_realised_pnl:,.0f} + unrealised ₹{unrealised_now:,.0f}) breached "
+            f"-₹{DAILY_MAX_LOSS:,} — force-closing to protect capital"
+        )
+    return ManagementDecision(action=EXIT_FULL, reason=reason, reasons=[reason], score=0)
+
+
 _STATE_FILE = Path(__file__).parent / "logs" / "algo_trade_state.json"
 
 
@@ -339,7 +438,12 @@ def _save_state():
     be told apart from a position placed manually in the same account.
     """
     trade = monitor.trade
-    state = {"date": datetime.now().strftime("%Y-%m-%d"), "trade": None, "strangle_legs": None}
+    state = {
+        "date": datetime.now().strftime("%Y-%m-%d"), "trade": None, "strangle_legs": None,
+        # Day-level risk state — without this a mid-day restart (deploys!) would forget
+        # what was already banked/lost today and silently disarm the profit lock.
+        "day_realised_pnl": _day_realised_pnl, "day_profit_locked": _day_profit_locked,
+    }
 
     if trade:
         state["trade"] = {
@@ -401,7 +505,7 @@ def _restore_positions_from_kite():
     manually in the same account. Cross-checks against live positions so a
     stale/closed trade doesn't get resurrected.
     """
-    global strangle_legs
+    global strangle_legs, _day_realised_pnl, _day_profit_locked, _day_pnl_reset_date
 
     if not _STATE_FILE.exists():
         logger.info("No persisted trade state — starting flat.")
@@ -412,6 +516,16 @@ def _restore_positions_from_kite():
     except Exception as e:
         logger.error(f"Failed to read persisted trade state: {e}")
         return
+
+    if state.get("date") == datetime.now().strftime("%Y-%m-%d"):
+        _day_realised_pnl   = float(state.get("day_realised_pnl", 0.0))
+        _day_profit_locked  = bool(state.get("day_profit_locked", False))
+        _day_pnl_reset_date = datetime.now().date()   # so run_scan doesn't zero it as a "new day"
+        if _day_realised_pnl or _day_profit_locked:
+            logger.info(
+                f"Restored day state: realised ₹{_day_realised_pnl:,.0f}  "
+                f"profit-lock {'ARMED' if _day_profit_locked else 'not armed'}"
+            )
 
     t = state.get("trade")
     if not t:
@@ -589,6 +703,17 @@ def eod_flatten():
     except Exception:
         kite, spot = None, 0.0
 
+    if kite is not None:
+        # Closed by hand already? Then there is nothing to flatten — and placing
+        # the exit orders anyway would open a position in the other direction.
+        _ext_close_strikes[_trade_key(trade)] = 1      # EOD is one-shot: don't wait for a 2nd sighting
+        if _reconcile_open_trade(kite) in ("FLAT", "CLOSED"):
+            _save_state()
+            return
+        trade = monitor.trade
+        if trade is None:
+            return
+
     if trade.action == "STRANGLE":
         logger.info(f"EOD flatten: STRANGLE {trade.strike}/{trade.expiry}")
         oc_exit = _fetch_oc_for_trade(kite, trade.expiry) if kite else None
@@ -700,22 +825,22 @@ def _enter_strangle(kite, signal, qty: int, spot: float, oc, pyramid_disabled: b
     return False
 
 
+def _sl_crossed(trade: TradeState, spot: float) -> bool:
+    """True if spot is through the trade's stop-loss level."""
+    if trade.action == "CALL_SELL":
+        return spot >= trade.sl_spot_level
+    if trade.action == "PUT_SELL":
+        return spot <= trade.sl_spot_level
+    if trade.action == "STRANGLE":
+        return spot >= trade.sl_spot_level or bool(trade.sl_put and spot <= trade.sl_put)
+    return False
+
+
 def _check_sl_hit(kite, trade: TradeState, spot: float, oc=None) -> bool:
     """Auto-exit if spot crossed the SL level. Returns True if trade was closed."""
     global strangle_legs
 
-    hit = False
-    if trade.action == "CALL_SELL" and spot >= trade.sl_spot_level:
-        hit = True
-    elif trade.action == "PUT_SELL" and spot <= trade.sl_spot_level:
-        hit = True
-    elif trade.action == "STRANGLE":
-        if spot >= trade.sl_spot_level:
-            hit = True
-        elif trade.sl_put and spot <= trade.sl_put:
-            hit = True
-
-    if not hit:
+    if not _sl_crossed(trade, spot):
         return False
 
     logger.warning(
@@ -864,6 +989,256 @@ def _check_sl_hit(kite, trade: TradeState, spot: float, oc=None) -> bool:
     monitor.clear_trade()
     strangle_legs = None
     return True
+
+
+# ── Broker reconciliation + intra-scan guard ───────────────────────────────────
+
+def _trade_leg_specs(trade: TradeState):
+    """The short leg(s) the bot believes are open: list of dicts with symbol,
+    strike, entry premium and hedge info. Strangles list only ACTIVE legs."""
+    sl = strangle_legs
+    if trade.action == "STRANGLE" and sl:
+        legs = []
+        if sl.ce_active:
+            legs.append(dict(kind="CE", symbol=sl.ce_symbol, strike=sl.ce_strike, entry=sl.ce_entry_premium,
+                             hedge_symbol=sl.hedge_ce_symbol, hedge_strike=sl.hedge_ce_strike,
+                             hedge_entry=sl.hedge_ce_entry_premium))
+        if sl.pe_active:
+            legs.append(dict(kind="PE", symbol=sl.pe_symbol, strike=sl.pe_strike, entry=sl.pe_entry_premium,
+                             hedge_symbol=sl.hedge_pe_symbol, hedge_strike=sl.hedge_pe_strike,
+                             hedge_entry=sl.hedge_pe_entry_premium))
+        return legs
+    return [dict(kind="CE" if trade.action == "CALL_SELL" else "PE", symbol=trade.symbol, strike=trade.strike,
+                 entry=trade.entry_premium, hedge_symbol=trade.hedge_symbol, hedge_strike=trade.hedge_strike,
+                 hedge_entry=trade.hedge_entry_premium)]
+
+
+def _external_close_fills(kite, leg: dict, since: datetime):
+    """Average real fill prices of the orders that closed `leg` outside the
+    bot: BUY of the sold option and SELL of its hedge, completed after `since`
+    (the trade's entry time). Returns (exit_ltp, hedge_exit_ltp, qty) — None /
+    0 where nothing was found."""
+    try:
+        orders = [o for o in kite.orders()
+                  if o.get("status") == "COMPLETE" and o.get("order_timestamp")
+                  and o["order_timestamp"] >= since]
+    except Exception as e:
+        logger.warning(f"Could not read orders to price an external close: {e}")
+        return None, None, 0
+
+    def _wavg(symbol, side):
+        os_ = [o for o in orders if o.get("tradingsymbol") == symbol and o.get("transaction_type") == side]
+        q = sum(o.get("filled_quantity", 0) for o in os_)
+        if not q:
+            return None, 0
+        return sum(o["average_price"] * o["filled_quantity"] for o in os_) / q, q
+
+    exit_px, qty = _wavg(leg["symbol"], "BUY")
+    hedge_px = None
+    if leg.get("hedge_symbol"):
+        hedge_px, _ = _wavg(leg["hedge_symbol"], "SELL")
+    return exit_px, hedge_px, qty
+
+
+def _journal_external_close(kite, trade: TradeState, leg: dict):
+    """The position was closed outside the bot (manual order). Journal it from
+    the real fills — so P&L, the day's realised total and the audit trail are
+    true — instead of the bot carrying a phantom trade."""
+    exit_px, hedge_px, filled = _external_close_fills(kite, leg, trade.entry_time)
+    qty = min(filled, trade.lots) if filled else trade.lots
+    main_pnl  = (leg["entry"] - exit_px) * qty if exit_px is not None else 0.0
+    hedge_pnl = ((hedge_px - leg["hedge_entry"]) * qty
+                 if hedge_px is not None and leg.get("hedge_entry") is not None else 0.0)
+    try:
+        spot = get_current_nifty_price(kite)
+    except Exception:
+        spot = 0.0
+
+    if trade.action == "STRANGLE":
+        leg_trade = TradeState(
+            action=f"STRANGLE_{leg['kind']}", strike=leg["strike"], symbol=leg["symbol"],
+            entry_time=trade.entry_time, entry_premium=leg["entry"], entry_spot=trade.entry_spot,
+            sl_spot_level=trade.sl_spot_level, expiry=trade.expiry, lots=qty,
+            hedge_symbol=leg.get("hedge_symbol"), hedge_strike=leg.get("hedge_strike"),
+            hedge_entry_premium=leg.get("hedge_entry"),
+        )
+    else:
+        leg_trade = trade
+    detail = (
+        f"Closed outside the bot — journaled from Kite fills "
+        f"(sold leg bought back @ {exit_px if exit_px is not None else 'n/a'}, "
+        f"hedge sold @ {hedge_px if hedge_px is not None else 'n/a'})"
+        + ("" if exit_px is not None else " — no closing fills found, P&L recorded as 0")
+    )
+    _record_trade_exit(leg_trade, exit_px, hedge_px, main_pnl, hedge_pnl, main_pnl + hedge_pnl, spot,
+                       "MANUAL_EXIT", exit_detail=detail)
+
+
+def _reconcile_open_trade(kite) -> str:
+    """
+    Compare the trade the bot THINKS is open with what the broker actually
+    holds — the user trades by hand in the same account and sometimes closes
+    the bot's position, which the bot used to discover only by placing exit
+    orders against a flat position (Oct 13: that opened a naked long CE and a
+    naked short hedge).
+
+    Returns:
+      "OK"      — still open at the broker (qty adopted down if it was reduced)
+      "FLAT"    — not at the broker on this check; caller must NOT place orders
+      "CLOSED"  — flat on 2 consecutive checks: journaled MANUAL_EXIT, state cleared
+      "UNKNOWN" — couldn't verify; caller carries on as before
+    """
+    global strangle_legs
+    trade = monitor.trade
+    if trade is None:
+        return "OK"
+    try:
+        live = {p["tradingsymbol"]: p.get("quantity", 0) for p in kite.positions()["net"]}
+    except Exception as e:
+        logger.warning(f"Reconcile: could not read broker positions ({e}) — skipping check")
+        return "UNKNOWN"
+
+    legs = _trade_leg_specs(trade)
+    if not legs:
+        return "OK"
+
+    missing = [l for l in legs if live.get(l["symbol"], 0) >= 0]     # short legs have NEGATIVE net qty
+    if not missing:
+        _ext_close_strikes.pop(_trade_key(trade), None)
+        live_qty = min(abs(live[l["symbol"]]) for l in legs)
+        if 0 < live_qty < trade.lots:
+            logger.warning(f"Reconcile: broker holds {live_qty} but bot tracked {trade.lots} — adopting {live_qty}")
+            _post(
+                f"⚠️ *Position size changed outside the bot*\n"
+                f"{trade.action.replace('_', ' ')} {trade.strike}: broker holds *{live_qty}*, bot tracked "
+                f"*{trade.lots}* — continuing with {live_qty}. Please check the hedge quantity."
+            )
+            trade.lots = live_qty
+            _save_state()
+        return "OK"
+
+    # Something the bot thinks is open isn't. A resting order may simply not have filled yet — don't touch it.
+    try:
+        resting = {o.get("tradingsymbol") for o in kite.orders()
+                   if o.get("status") in ("OPEN", "TRIGGER PENDING", "AMO REQ RECEIVED")}
+    except Exception:
+        resting = set()
+    if any(l["symbol"] in resting for l in missing):
+        return "UNKNOWN"
+
+    key = _trade_key(trade)
+    _ext_close_strikes[key] = _ext_close_strikes.get(key, 0) + 1
+    names = ", ".join(l["symbol"] for l in missing)
+    if _ext_close_strikes[key] < 2:
+        logger.warning(f"Reconcile: {names} not found at the broker (1st check) — no orders will be placed; re-checking")
+        return "FLAT"
+
+    logger.warning(f"Reconcile: {names} flat at the broker on 2 checks — treating as closed outside the bot")
+    for leg in missing:
+        _journal_external_close(kite, trade, leg)
+        if trade.action == "STRANGLE" and strangle_legs:
+            if leg["kind"] == "CE":
+                strangle_legs.ce_active = False
+            else:
+                strangle_legs.pe_active = False
+    still_open = trade.action == "STRANGLE" and strangle_legs and (strangle_legs.ce_active or strangle_legs.pe_active)
+    if not still_open:
+        monitor.clear_trade()
+        strangle_legs = None
+    _ext_close_strikes.pop(key, None)
+    _post(
+        f"🖐 *Position closed outside the bot*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{trade.action.replace('_', ' ')} {trade.strike} was no longer open at the broker, so the bot "
+        f"has stopped tracking it and placed *no* exit orders.\n"
+        f"Journaled as a manual exit from your actual fills."
+    )
+    _save_state()
+    return "CLOSED"
+
+
+def _trade_key(trade: TradeState) -> str:
+    return f"{trade.symbol}|{trade.entry_time:%Y%m%d%H%M%S}"
+
+
+def _leg_ltps(kite, trade: TradeState):
+    """(current_ltp, strangle_ce_ltp, strangle_pe_ltp) from one cheap kite.ltp
+    call — the same shape run_scan derives from the option chain."""
+    sl = strangle_legs
+    syms = []
+    if trade.action == "STRANGLE" and sl:
+        if sl.ce_active:
+            syms.append(sl.ce_symbol)
+        if sl.pe_active:
+            syms.append(sl.pe_symbol)
+    else:
+        syms.append(trade.symbol)
+    if not syms:
+        return None, None, None
+    data = kite.ltp([f"NFO:{s}" for s in syms])
+    px = lambda s: (data.get(f"NFO:{s}") or {}).get("last_price") or None
+    if trade.action == "STRANGLE" and sl:
+        return None, (px(sl.ce_symbol) if sl.ce_active else None), (px(sl.pe_symbol) if sl.pe_active else None)
+    return px(trade.symbol), None, None
+
+
+def guard_check():
+    """
+    Runs every GUARD_INTERVAL_SECONDS while a trade is open. Between the
+    15-minute scans it (1) reconciles with the broker, (2) acts on a spot move
+    through the SL, and (3) enforces the day floor (-DAILY_MAX_LOSS, or the
+    profit-lock floor once armed). Cheap calls only; the heavy exit path (the
+    same code the scans use) runs only when a trigger actually fires.
+    """
+    trade = monitor.trade
+    if trade is None or not _is_market_open():
+        return
+    try:
+        kite = _get_kite()
+        if _reconcile_open_trade(kite) in ("FLAT", "CLOSED"):
+            return
+        trade = monitor.trade
+        if trade is None:
+            return
+        spot = get_current_nifty_price(kite)
+
+        sl_crossed = _sl_crossed(trade, spot)
+        decision = None
+        if not sl_crossed:
+            cur, ce, pe = _leg_ltps(kite, trade)
+            unrealised = _current_unrealised(trade, strangle_legs, cur, ce, pe)
+            if unrealised is None:
+                return
+            total_today = _day_realised_pnl + unrealised
+            if total_today > _day_floor():
+                return
+            decision = _floor_breach_decision(total_today, unrealised)
+
+        trade_oc = _fetch_oc_for_trade(kite, trade.expiry)
+        if trade_oc is None:
+            key = f"oc|{_trade_key(trade)}"
+            if key not in _guard_alerted:
+                _guard_alerted.add(key)
+                send_error_alert(
+                    f"🚨 Guard: {trade.action} {trade.strike} needs to exit "
+                    f"({'SL crossed' if sl_crossed else 'day floor hit'}) but the matching option chain "
+                    f"could not be fetched — retrying every minute."
+                )
+            return
+
+        if sl_crossed:
+            logger.warning(f"GUARD: SL crossed between scans — spot {spot:.1f}, exiting {trade.action} {trade.strike}")
+            _check_sl_hit(kite, trade, spot, oc=trade_oc)
+        else:
+            logger.warning(f"GUARD: {decision.reason}")
+            _handle_management_decision(decision, trade, spot, None, None, None, trade_oc, None)
+        _save_state()
+    except Exception as e:
+        logger.exception(f"Guard error: {e}")
+        key = f"err|{type(e).__name__}"
+        if key not in _guard_alerted:
+            _guard_alerted.add(key)
+            send_error_alert(f"Guard check error: {e}")
 
 
 def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
@@ -1148,6 +1523,8 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
                     tag = "STRANGLE_TARGET"
                 elif decision.reason.startswith("🛑 Daily loss breaker"):
                     tag = "DAILY_LOSS_BREAKER"
+                elif decision.reason.startswith("🔒 Day profit-lock"):
+                    tag = "DAY_PROFIT_LOCK"
                 elif decision.reason.startswith("EOD flatten"):
                     tag = "EOD_FLATTEN"
                 else:
@@ -1219,6 +1596,8 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
             )
             if decision.reason.startswith("🛑 Daily loss breaker"):
                 directional_tag = "DAILY_LOSS_BREAKER"
+            elif decision.reason.startswith("🔒 Day profit-lock"):
+                directional_tag = "DAY_PROFIT_LOCK"
             elif decision.reason.startswith("EOD flatten"):
                 directional_tag = "EOD_FLATTEN"
             elif decision.reason.startswith("Trailing profit lock"):
@@ -1308,7 +1687,7 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
 def run_scan():
     global strangle_legs, _signal_exit_blocked, _signal_exit_reset_date
     global _signal_exit_cooldown, _reentry_count
-    global _day_realised_pnl, _day_pnl_reset_date, _day_loss_alerted
+    global _day_realised_pnl, _day_pnl_reset_date, _day_loss_alerted, _day_profit_locked
     if not _is_market_open():
         logger.info("Market closed — skipping.")
         return
@@ -1323,6 +1702,7 @@ def run_scan():
         _day_realised_pnl   = 0.0
         _day_pnl_reset_date = today
         _day_loss_alerted   = False
+        _day_profit_locked  = False
 
     logger.info("═" * 55)
     logger.info(f"Scan @ {datetime.now().strftime('%H:%M:%S')}")
@@ -1348,7 +1728,15 @@ def run_scan():
 
         # ── Active position management ────────────────────────────
         if monitor.trade is not None:
+            # First: is the position really still open at the broker? If it was
+            # closed by hand, never place exit orders against a flat position.
+            if _reconcile_open_trade(kite) in ("FLAT", "CLOSED"):
+                _save_state()
+                return
             trade = monitor.trade
+            if trade is None:
+                _save_state()
+                return
 
             # An open trade may be on a DIFFERENT expiry than "current week" if
             # it was entered via the low-premium next-week fallback (see
@@ -1403,18 +1791,11 @@ def run_scan():
             unrealised_now = _current_unrealised(trade, strangle_legs, current_ltp, strangle_ce_ltp, strangle_pe_ltp)
             if unrealised_now is not None:
                 total_today = _day_realised_pnl + unrealised_now
-                if total_today <= -DAILY_MAX_LOSS:
+                if total_today <= _day_floor():
+                    breach_decision = _floor_breach_decision(total_today, unrealised_now)
                     logger.warning(
-                        f"DAILY LOSS BREAKER: realised ₹{_day_realised_pnl:,.0f} + unrealised ₹{unrealised_now:,.0f} "
-                        f"= ₹{total_today:,.0f} <= -₹{DAILY_MAX_LOSS:,} — force-closing"
-                    )
-                    breach_reason = (
-                        f"🛑 Daily loss breaker: today's P&L ₹{total_today:,.0f} (realised "
-                        f"₹{_day_realised_pnl:,.0f} + unrealised ₹{unrealised_now:,.0f}) breached "
-                        f"-₹{DAILY_MAX_LOSS:,} — force-closing to protect capital"
-                    )
-                    breach_decision = ManagementDecision(
-                        action=EXIT_FULL, reason=breach_reason, reasons=[breach_reason], score=0,
+                        f"DAY FLOOR HIT: realised ₹{_day_realised_pnl:,.0f} + unrealised ₹{unrealised_now:,.0f} "
+                        f"= ₹{total_today:,.0f} <= ₹{_day_floor():,.0f} — force-closing"
                     )
                     _handle_management_decision(breach_decision, trade, spot, tl_result, rsi_result, trade_opt, trade_oc, df)
                     return
@@ -1459,7 +1840,7 @@ def run_scan():
                 logger.info(f"Strangle single leg running: {strangle_legs.remaining_leg}")
 
         # ── New entry (no active trade) ───────────────────────────
-        elif _entry_allowed() and _day_realised_pnl > -DAILY_MAX_LOSS:
+        elif _entry_allowed() and _day_realised_pnl > _day_floor():
             final = combine_signals(
                 tl=tl_result, rsi=rsi_result, opt=opt_signal,
                 spot_price=spot, expiry=oc.weekly_expiry_date,
@@ -1469,6 +1850,8 @@ def run_scan():
             final, pyramid_disabled_flag = _apply_low_premium_fallback(
                 kite, final, tl_result, rsi_result, spot
             )
+            # Protected mode (day profit already banked): smaller size, no pyramiding.
+            final, pyramid_disabled_flag = _apply_profit_lock_sizing(final, spot, pyramid_disabled_flag)
 
             # Same-direction re-entry control after a SIGNAL_EXIT: cool down for a
             # few candles, then allow back only on a fresh STRONG (3/3) signal,
@@ -1534,18 +1917,29 @@ def run_scan():
                     _signal_exit_cooldown = 0
 
         elif _entry_allowed():
-            # Reachable only when the daily realised-loss breaker has tripped
-            # (entry window is open but _day_realised_pnl <= -DAILY_MAX_LOSS).
+            # Reachable only when the day floor has been reached (entry window is
+            # open but _day_realised_pnl <= _day_floor()): -DAILY_MAX_LOSS normally,
+            # DAY_PROFIT_FLOOR once protected mode is armed.
             if not _day_loss_alerted:
                 _day_loss_alerted = True
-                _post(
-                    f"🛑 *DAILY LOSS LIMIT HIT*\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"Realised P&L today: *{_fmt_pnl(_day_realised_pnl)}*  "
-                    f"(limit −₹{DAILY_MAX_LOSS:,})\n"
-                    f"_No more entries today. Existing position management continues._"
-                )
-                logger.info(f"Daily loss breaker tripped: realised ₹{_day_realised_pnl:,.0f} — entries halted")
+                if _day_profit_locked:
+                    _post(
+                        f"🔒 *PROFIT LOCK — NO MORE ENTRIES*\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"Today's P&L is back to *{_fmt_pnl(_day_realised_pnl)}* "
+                        f"(floor ₹{DAY_PROFIT_FLOOR:,}).\n"
+                        f"No more entries today. Existing position management continues."
+                    )
+                    logger.info(f"Profit-lock floor reached: realised ₹{_day_realised_pnl:,.0f} — entries halted")
+                else:
+                    _post(
+                        f"🛑 *DAILY LOSS LIMIT HIT*\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"Realised P&L today: *{_fmt_pnl(_day_realised_pnl)}*  "
+                        f"(limit −₹{DAILY_MAX_LOSS:,})\n"
+                        f"No more entries today. Existing position management continues."
+                    )
+                    logger.info(f"Daily loss breaker tripped: realised ₹{_day_realised_pnl:,.0f} — entries halted")
             final = combine_signals(
                 tl=tl_result, rsi=rsi_result, opt=opt_signal,
                 spot_price=spot, expiry=oc.weekly_expiry_date,
@@ -1576,6 +1970,10 @@ def main():
         f"EOD flatten: {EOD_FLATTEN_HOUR:02d}:{EOD_FLATTEN_MIN:02d} — everything flattens every day, "
         f"purely intraday (directionals and strangles alike, no overnight holds)"
     )
+    logger.info(
+        f"Guard: SL / day-floor / broker-reconcile check every {GUARD_INTERVAL_SECONDS}s while a trade is open; "
+        f"profit lock arms at ₹{DAY_PROFIT_ARM_PNL:,} banked (max {PROTECTED_MAX_LOTS} lots, floor ₹{DAY_PROFIT_FLOOR:,})"
+    )
 
     start_command_listener()
     _restore_positions_from_kite()
@@ -1585,10 +1983,11 @@ def main():
         schedule.every().hour.at(minute).do(run_scan)
 
     schedule.every().day.at(f"{EOD_FLATTEN_HOUR:02d}:{EOD_FLATTEN_MIN:02d}").do(eod_flatten)
+    schedule.every(GUARD_INTERVAL_SECONDS).seconds.do(guard_check)
 
     while True:
         schedule.run_pending()
-        time.sleep(30)
+        time.sleep(5)
 
 
 if __name__ == "__main__":
