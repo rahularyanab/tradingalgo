@@ -57,6 +57,7 @@ from config import (
     MAX_LOTS_DIRECTIONAL, MAX_LOTS_STRANGLE_LEG, LOW_PREMIUM_THRESHOLD,
     DAY_PROFIT_ARM_PNL, DAY_PROFIT_FLOOR, PROTECTED_MAX_LOTS, PROTECTED_DELTA_EST,
     GUARD_INTERVAL_SECONDS,
+    LATE_ENTRY_HOUR, LATE_ENTRY_MIN, LATE_ENTRY_SIZE_FACTOR,
 )
 from data.market_data import get_kite_client, fetch_nifty_candles, get_current_nifty_price
 from data.option_chain import fetch_option_chain
@@ -382,6 +383,26 @@ def _protected_lots(requested_lots: int, sl_distance_pts: float) -> int:
     while lots > 1 and lots * loss_per_lot > cushion:
         lots -= 1
     return lots
+
+
+def _apply_late_entry_sizing(final, now: Optional[datetime] = None):
+    """New entries from LATE_ENTRY_HOUR:MIN onward are sized down by
+    LATE_ENTRY_SIZE_FACTOR (rounded down, minimum 1 lot). Mutates `final` so
+    the Telegram signal shows the size actually traded."""
+    now = now or datetime.now()
+    if final.action not in ("CALL_SELL", "PUT_SELL", "STRANGLE"):
+        return final
+    if now.hour * 60 + now.minute < LATE_ENTRY_HOUR * 60 + LATE_ENTRY_MIN:
+        return final
+    attr = "strangle_lots" if final.action == "STRANGLE" else "lots"
+    cur  = getattr(final, attr)
+    new  = max(1, int(cur * LATE_ENTRY_SIZE_FACTOR))
+    if new < cur:
+        setattr(final, attr, new)
+        note = f"⏰ Late entry (after {LATE_ENTRY_HOUR:02d}:{LATE_ENTRY_MIN:02d}): sized {new} lot(s) instead of {cur}"
+        final.reasons.append(note)
+        logger.info(note)
+    return final
 
 
 def _apply_profit_lock_sizing(final, spot: float, pyramid_disabled: bool):
@@ -1850,7 +1871,9 @@ def run_scan():
             final, pyramid_disabled_flag = _apply_low_premium_fallback(
                 kite, final, tl_result, rsi_result, spot
             )
-            # Protected mode (day profit already banked): smaller size, no pyramiding.
+            # Late-day entries are sized down; then protected mode (day profit
+            # already banked) can shrink further and switches pyramiding off.
+            final = _apply_late_entry_sizing(final)
             final, pyramid_disabled_flag = _apply_profit_lock_sizing(final, spot, pyramid_disabled_flag)
 
             # Same-direction re-entry control after a SIGNAL_EXIT: cool down for a
@@ -1973,6 +1996,10 @@ def main():
     logger.info(
         f"Guard: SL / day-floor / broker-reconcile check every {GUARD_INTERVAL_SECONDS}s while a trade is open; "
         f"profit lock arms at ₹{DAY_PROFIT_ARM_PNL:,} banked (max {PROTECTED_MAX_LOTS} lots, floor ₹{DAY_PROFIT_FLOOR:,})"
+    )
+    logger.info(
+        f"Late-entry size cut: entries from {LATE_ENTRY_HOUR:02d}:{LATE_ENTRY_MIN:02d} are sized at "
+        f"{int(LATE_ENTRY_SIZE_FACTOR * 100)}% (min 1 lot)"
     )
 
     start_command_listener()

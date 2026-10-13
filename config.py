@@ -125,6 +125,15 @@ PROTECTED_MAX_LOTS  = 2          # protected mode: cap on lots for any NEW trade
                                   # under the floor — see _protected_lots in main.py)
 PROTECTED_DELTA_EST = 0.6        # rough option delta used to estimate the loss per lot at the SL
 
+# ── Late-day size cut ──────────────────────────────────────────────
+# History (99 live entries): trades opened from 14:00 had a median loss and a
+# profit factor under 0.5, while the day's money is made in the morning. New
+# entries at/after this time are sized down (3 lots -> 1, 2 lots -> 1; a
+# strangle's per-leg 2 -> 1). Signals and exits are unchanged.
+LATE_ENTRY_HOUR        = 14
+LATE_ENTRY_MIN         = 0
+LATE_ENTRY_SIZE_FACTOR = 0.5     # fraction of the signal's lots, rounded down, never below 1
+
 # ── Intra-scan guard ───────────────────────────────────────────────
 # Scans run every 15 min; between them the bot used to be blind, so a spot
 # move through the SL was only acted on at the next scan (Oct 13: crossed at
