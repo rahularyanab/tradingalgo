@@ -48,7 +48,7 @@ from config import (
     MARKET_CLOSE_HOUR, MARKET_CLOSE_MIN,
     ENTRY_START_HOUR, ENTRY_START_MIN,
     FORCE_EXIT_HOUR, FORCE_EXIT_MIN,
-    EOD_FLATTEN_HOUR, EOD_FLATTEN_MIN, EOD_FLATTEN_RETRY_AFTER_MIN,
+    EOD_FLATTEN_HOUR, EOD_FLATTEN_MIN, EOD_FLATTEN_RETRY_AFTER_MIN, EOD_VERIFY_AFTER_MIN,
     STRANGLE_CUTOFF_HOUR, STRANGLE_CUTOFF_MIN,
     FRIDAY_STRANGLE_CUTOFF, STRANGLE_SL_BUFFER,
     NIFTY_LOT_SIZE,
@@ -99,6 +99,15 @@ JOURNAL_FIELDS = [
 
 
 _EOD_LABEL = f"{EOD_FLATTEN_HOUR - 12}:{EOD_FLATTEN_MIN:02d} PM"   # derived from config so the text can't drift
+
+
+def _eod_verify_times() -> list:
+    """['15:26', '15:29'] — an early "did it fill?" check and a final one a
+    minute before the close."""
+    first = EOD_FLATTEN_HOUR * 60 + EOD_FLATTEN_MIN + EOD_VERIFY_AFTER_MIN
+    last  = MARKET_CLOSE_HOUR * 60 + MARKET_CLOSE_MIN - 1
+    times = sorted({min(first, last), last})
+    return [f"{t // 60:02d}:{t % 60:02d}" for t in times]
 
 
 def _eod_flatten_times() -> list:
@@ -310,6 +319,7 @@ _day_loss_alerted: bool = False  # True once the daily-loss breaker has alerted 
 _day_profit_locked: bool = False  # True once today's realised P&L has reached DAY_PROFIT_ARM_PNL (latched for the day)
 _ext_close_strikes: dict = {}    # trade key -> consecutive checks that found it flat at the broker (manual close)
 _guard_alerted: set = set()      # one-shot alert keys for the intra-scan guard (avoids a message per minute)
+_eod_verify: list = []         # legs the EOD flatten just tried to close — checked against the broker by verify_eod_flatten()
 
 
 def _get_kite():
@@ -762,7 +772,9 @@ def eod_flatten():
             return
         reason = f"EOD flatten — {_EOD_LABEL} (purely intraday, no overnight holds)"
         decision = ManagementDecision(action=EXIT_FULL, reason=reason, reasons=[reason], score=0)
+        attempted = _eod_attempt_snapshot(trade)
         _handle_management_decision(decision, trade, spot, None, None, None, oc_exit, None)
+        _eod_register_verify(attempted)
         return
 
     oc_exit = _fetch_oc_for_trade(kite, trade.expiry) if kite else None
@@ -776,8 +788,84 @@ def eod_flatten():
         return
 
     logger.info(f"EOD flatten: {trade.action} {trade.strike}")
+    attempted = _eod_attempt_snapshot(trade)
     _close_directional_slice(trade, kite, spot, oc_exit, trade.lots,
                               tag="EOD_FLATTEN", time_label=_EOD_LABEL)
+    _eod_register_verify(attempted)
+
+
+def _eod_attempt_snapshot(trade: TradeState) -> list:
+    """The sold legs (and hedges) an EOD flatten is about to try to close."""
+    return [dict(label=f"{l['kind']} {l['strike']}", symbol=l["symbol"], hedge=l.get("hedge_symbol"), qty=trade.lots)
+            for l in _trade_leg_specs(trade)]
+
+
+def _eod_register_verify(attempted: list):
+    """Remember what the flatten sent orders for — but only if the bot now
+    considers the trade closed (otherwise the retry is still handling it)."""
+    if monitor.trade is None and attempted:
+        _eod_verify.extend(attempted)
+
+
+def verify_eod_flatten(final: bool = False):
+    """
+    "Order accepted" is not "order filled" (Aug 24: an exit the bot believed
+    done never filled). After the flatten has sent its orders, ask the broker
+    whether the sold legs are really gone. Scheduled twice — shortly after the
+    flatten and, with final=True, a minute before the close. Silent when
+    nothing was flattened.
+    """
+    global _eod_verify
+    if not _eod_verify:
+        return
+    last = final
+    try:
+        kite = _get_kite()
+        live = {p["tradingsymbol"]: p.get("quantity", 0) for p in kite.positions()["net"]}
+        orders = kite.orders()
+    except Exception as e:
+        send_error_alert(
+            f"🚨 EOD flatten: could not verify the exit with the broker ({e}). "
+            f"Check your positions manually before the 15:30 close."
+        )
+        if last:
+            _eod_verify = []
+        return
+
+    still = []
+    for leg in _eod_verify:
+        q = live.get(leg["symbol"], 0)
+        if q < 0:
+            resting = [o for o in orders if o.get("tradingsymbol") == leg["symbol"]
+                       and o.get("transaction_type") == "BUY" and o.get("status") in ("OPEN", "TRIGGER PENDING")]
+            if resting:
+                o = resting[-1]
+                why = f"exit BUY {o.get('quantity')} still resting at {o.get('price')} (not filled)"
+            else:
+                rej = [o for o in orders if o.get("tradingsymbol") == leg["symbol"]
+                       and o.get("transaction_type") == "BUY" and o.get("status") in ("REJECTED", "CANCELLED")]
+                why = (f"exit order {rej[-1].get('status')}: {rej[-1].get('status_message') or 'no reason given'}"
+                       if rej else "no exit order found")
+            still.append(f"{leg['label']} ({leg['symbol']}) still SHORT {abs(q)} — {why}")
+
+    if still:
+        send_error_alert(
+            "🚨 EOD flatten: position NOT closed at the broker! "
+            + " | ".join(still)
+            + " — close it manually before the 15:30 close."
+            + ("" if last else f" The bot checks again at {_eod_verify_times()[-1]}.")
+        )
+        if last:
+            _eod_verify = []
+        return
+
+    stray = [leg for leg in _eod_verify if leg.get("hedge") and live.get(leg["hedge"], 0) > 0]
+    _post(
+        "✅ *EOD flatten verified* — all sold legs are flat at the broker."
+        + (f"\nNote: a long hedge is still open ({', '.join(l['hedge'] for l in stray)}) — harmless, but square it off if you like."
+           if stray else "")
+    )
+    _eod_verify = []
 
 
 def _register_strangle(signal, spot, oc):
@@ -2002,7 +2090,7 @@ def main():
     logger.info("Nifty Option Selling Bot starting...")
     logger.info(f"Entry: {ENTRY_START_HOUR:02d}:{ENTRY_START_MIN:02d} → {FORCE_EXIT_HOUR:02d}:{FORCE_EXIT_MIN:02d}")
     logger.info(
-        f"EOD flatten: {' and retry '.join(_eod_flatten_times())} — everything flattens every day, "
+        f"EOD flatten: {' and retry '.join(_eod_flatten_times())} (fill check {', '.join(_eod_verify_times())}) — everything flattens every day, "
         f"purely intraday (directionals and strangles alike, no overnight holds)"
     )
     logger.info(
@@ -2026,6 +2114,9 @@ def main():
     # right option chain (it then alerts and leaves the position open).
     for t in _eod_flatten_times():
         schedule.every().day.at(t).do(eod_flatten)
+    # …and ask the broker whether the flatten really filled ("accepted" != "filled").
+    for t in _eod_verify_times():
+        schedule.every().day.at(t).do(verify_eod_flatten, final=(t == _eod_verify_times()[-1]))
     schedule.every(GUARD_INTERVAL_SECONDS).seconds.do(guard_check)
 
     while True:

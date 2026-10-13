@@ -73,6 +73,8 @@ EOD_FLATTEN_MIN    = 25           # exceptions (directionals AND strangles — p
                                    # 2026-10-14 (Rahul moved it later); market closes 15:30, so don't go past ~15:27.
 EOD_FLATTEN_RETRY_AFTER_MIN = 2   # second, identical flatten attempt this many minutes later (3:27). It is a
                                    # no-op when nothing is open; it exists for a failed first attempt (chain fetch).
+EOD_VERIFY_AFTER_MIN = 1          # first "did the flatten actually fill?" check this many minutes after it (3:26);
+                                   # a final check runs a minute before the close (3:29)
 STRANGLE_CUTOFF_HOUR   = 14       # strangles allowed until 14:45 — narrower than the 14:55 directional
 STRANGLE_CUTOFF_MIN    = 45       # cutoff; originally sized for overnight hold, now vestigial since
                                    # strangles flatten same-day too (kept as-is, not requested to change)
