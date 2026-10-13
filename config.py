@@ -75,6 +75,9 @@ EOD_FLATTEN_RETRY_AFTER_MIN = 2   # second, identical flatten attempt this many 
                                    # no-op when nothing is open; it exists for a failed first attempt (chain fetch).
 EOD_VERIFY_AFTER_MIN = 1          # first "did the flatten actually fill?" check this many minutes after it (3:26);
                                    # a final check runs a minute before the close (3:29)
+EXIT_VERIFY_DELAY_SEC     = 45    # stop-type exits (SL / day floor): first fill check this long after the exit
+EXIT_VERIFY_REALERT_MIN   = 2     # re-alert at this interval while the position is still open
+EXIT_VERIFY_GIVE_UP_MIN   = 6     # stop checking (with a last "check manually") this long after the exit
 STRANGLE_CUTOFF_HOUR   = 14       # strangles allowed until 14:45 — narrower than the 14:55 directional
 STRANGLE_CUTOFF_MIN    = 45       # cutoff; originally sized for overnight hold, now vestigial since
                                    # strangles flatten same-day too (kept as-is, not requested to change)

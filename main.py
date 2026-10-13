@@ -49,6 +49,7 @@ from config import (
     ENTRY_START_HOUR, ENTRY_START_MIN,
     FORCE_EXIT_HOUR, FORCE_EXIT_MIN,
     EOD_FLATTEN_HOUR, EOD_FLATTEN_MIN, EOD_FLATTEN_RETRY_AFTER_MIN, EOD_VERIFY_AFTER_MIN,
+    EXIT_VERIFY_DELAY_SEC, EXIT_VERIFY_REALERT_MIN, EXIT_VERIFY_GIVE_UP_MIN,
     STRANGLE_CUTOFF_HOUR, STRANGLE_CUTOFF_MIN,
     FRIDAY_STRANGLE_CUTOFF, STRANGLE_SL_BUFFER,
     NIFTY_LOT_SIZE,
@@ -286,6 +287,11 @@ def _record_trade_exit(
     send_trade_journal_entry(trade, exit_ltp, hedge_exit_ltp, main_pnl, hedge_pnl, total_pnl, spot, exit_reason,
                               exit_detail=exit_detail)
 
+    # A stop was sent to the broker — "accepted" is not "filled". Have the next
+    # fill check confirm the sold leg is really gone (verify_exit_fills).
+    if exit_reason in _STOP_EXIT_TAGS:
+        _register_exit_verify(exit_reason, trade)
+
 
 def _buy_price(oc, opt_type: str, strike: int) -> Optional[float]:
     """Current LTP + ₹2 buffer for a buy-to-cover order (rounded up to tick)."""
@@ -320,6 +326,8 @@ _day_profit_locked: bool = False  # True once today's realised P&L has reached D
 _ext_close_strikes: dict = {}    # trade key -> consecutive checks that found it flat at the broker (manual close)
 _guard_alerted: set = set()      # one-shot alert keys for the intra-scan guard (avoids a message per minute)
 _eod_verify: list = []         # legs the EOD flatten just tried to close — checked against the broker by verify_eod_flatten()
+_exit_verify: list = []        # stop-type exits (SL / day floor) awaiting a broker fill check — see verify_exit_fills()
+_STOP_EXIT_TAGS = {"SL_HIT", "DAILY_LOSS_BREAKER", "DAY_PROFIT_LOCK"}   # full exits that must be verified as filled
 
 
 def _get_kite():
@@ -807,6 +815,89 @@ def _eod_register_verify(attempted: list):
         _eod_verify.extend(attempted)
 
 
+def _why_still_short(orders: list, symbol: str) -> str:
+    """One line on what happened to the exit order of a leg that is still open."""
+    resting = [o for o in orders if o.get("tradingsymbol") == symbol
+               and o.get("transaction_type") == "BUY" and o.get("status") in ("OPEN", "TRIGGER PENDING")]
+    if resting:
+        o = resting[-1]
+        return f"exit BUY {o.get('quantity')} still resting at {o.get('price')} (not filled)"
+    rej = [o for o in orders if o.get("tradingsymbol") == symbol
+           and o.get("transaction_type") == "BUY" and o.get("status") in ("REJECTED", "CANCELLED")]
+    if rej:
+        return f"exit order {rej[-1].get('status')}: {rej[-1].get('status_message') or 'no reason given'}"
+    return "no exit order found"
+
+
+def _register_exit_verify(tag: str, trade: TradeState):
+    """Queue a stop-type exit (SL / day floor) for a broker fill check."""
+    if not trade.symbol or not trade.lots:
+        return
+    kind = {"SL_HIT": "SL exit", "DAILY_LOSS_BREAKER": "Daily-loss exit", "DAY_PROFIT_LOCK": "Profit-lock exit"}.get(tag, tag)
+    _exit_verify.append(dict(
+        kind=kind, symbol=trade.symbol, hedge=trade.hedge_symbol, qty=trade.lots,
+        label=trade.action.replace("_", " ") + f" {trade.strike}", t=datetime.now(), alerts=0, last_alert=None,
+    ))
+
+
+def verify_exit_fills(now: Optional[datetime] = None):
+    """
+    Same "accepted != filled" check as the EOD flatten, for stop-type exits.
+    Runs every minute; looks at each queued exit once it is
+    EXIT_VERIFY_DELAY_SEC old. Flat → one-line confirmation. Still short →
+    alert naming the leg and why, repeated every EXIT_VERIFY_REALERT_MIN until
+    it fills or EXIT_VERIFY_GIVE_UP_MIN passes. ALERT ONLY — places no orders.
+    Silent when nothing is queued.
+    """
+    global _exit_verify
+    if not _exit_verify:
+        return
+    now = now or datetime.now()
+    if not _is_market_open():
+        _exit_verify = []
+        return
+    due = [e for e in _exit_verify if (now - e["t"]).total_seconds() >= EXIT_VERIFY_DELAY_SEC]
+    if not due:
+        return
+    try:
+        kite = _get_kite()
+        live = {p["tradingsymbol"]: p.get("quantity", 0) for p in kite.positions()["net"]}
+        orders = kite.orders()
+    except Exception as e:
+        logger.warning(f"Exit fill check: could not reach the broker ({e}) — will retry")
+        return
+
+    for e in due:
+        age_min = (now - e["t"]).total_seconds() / 60
+        q = live.get(e["symbol"], 0)
+        if q >= 0:                                   # sold leg is gone
+            if e["alerts"]:
+                _post(f"✅ *{e['kind']} now filled* — {e['label']} is flat at the broker.")
+            else:
+                _post(f"✅ *{e['kind']} verified* — {e['label']} is flat at the broker.")
+            _exit_verify.remove(e)
+            continue
+
+        giving_up = age_min >= EXIT_VERIFY_GIVE_UP_MIN
+        due_alert = e["last_alert"] is None or (now - e["last_alert"]).total_seconds() / 60 >= EXIT_VERIFY_REALERT_MIN
+        if due_alert or giving_up:
+            try:
+                ltp = kite.ltp([f"NFO:{e['symbol']}"])[f"NFO:{e['symbol']}"]["last_price"]
+                mkt = f", market now {ltp}"
+            except Exception:
+                mkt = ""
+            send_error_alert(
+                f"🚨 {e['kind']} NOT filled: {e['label']} ({e['symbol']}) still SHORT {abs(q)} at the broker "
+                f"(net position — includes any manual trades in this symbol) — {_why_still_short(orders, e['symbol'])}{mkt}. "
+                + ("Giving up on checking — close it manually NOW."
+                   if giving_up else "Close it manually; the bot checks again shortly.")
+            )
+            e["alerts"] += 1
+            e["last_alert"] = now
+        if giving_up:
+            _exit_verify.remove(e)
+
+
 def verify_eod_flatten(final: bool = False):
     """
     "Order accepted" is not "order filled" (Aug 24: an exit the bot believed
@@ -836,17 +927,7 @@ def verify_eod_flatten(final: bool = False):
     for leg in _eod_verify:
         q = live.get(leg["symbol"], 0)
         if q < 0:
-            resting = [o for o in orders if o.get("tradingsymbol") == leg["symbol"]
-                       and o.get("transaction_type") == "BUY" and o.get("status") in ("OPEN", "TRIGGER PENDING")]
-            if resting:
-                o = resting[-1]
-                why = f"exit BUY {o.get('quantity')} still resting at {o.get('price')} (not filled)"
-            else:
-                rej = [o for o in orders if o.get("tradingsymbol") == leg["symbol"]
-                       and o.get("transaction_type") == "BUY" and o.get("status") in ("REJECTED", "CANCELLED")]
-                why = (f"exit order {rej[-1].get('status')}: {rej[-1].get('status_message') or 'no reason given'}"
-                       if rej else "no exit order found")
-            still.append(f"{leg['label']} ({leg['symbol']}) still SHORT {abs(q)} — {why}")
+            still.append(f"{leg['label']} ({leg['symbol']}) still SHORT {abs(q)} — {_why_still_short(orders, leg['symbol'])}")
 
     if still:
         send_error_alert(
@@ -2114,6 +2195,8 @@ def main():
     # right option chain (it then alerts and leaves the position open).
     for t in _eod_flatten_times():
         schedule.every().day.at(t).do(eod_flatten)
+    # Stop-type exits (SL / day floor) get the same "did it really fill?" check, every minute.
+    schedule.every(GUARD_INTERVAL_SECONDS).seconds.do(verify_exit_fills)
     # …and ask the broker whether the flatten really filled ("accepted" != "filled").
     for t in _eod_verify_times():
         schedule.every().day.at(t).do(verify_eod_flatten, final=(t == _eod_verify_times()[-1]))
