@@ -68,9 +68,9 @@ ENTRY_START_HOUR   = 10
 ENTRY_START_MIN    = 0            # first entry only after 10:00 (avoids opening noise)
 FORCE_EXIT_HOUR    = 14
 FORCE_EXIT_MIN     = 55           # entry window closes at 14:55 — no new trades this late (unchanged)
-EOD_FLATTEN_HOUR   = 15           # 3:15 PM — single full flatten of whatever's open, every day, no
-EOD_FLATTEN_MIN    = 15           # exceptions (directionals AND strangles — purely intraday). Replaces
-                                   # the old 2:55/3:25 split — the 3:25 leg sat 5 min from close, in the manipulation window.
+EOD_FLATTEN_HOUR   = 15           # 3:25 PM — single full flatten of whatever's open, every day, no
+EOD_FLATTEN_MIN    = 25           # exceptions (directionals AND strangles — purely intraday). Was 3:15 until
+                                   # 2026-10-14 (Rahul moved it later); market closes 15:30, so don't go past ~15:27.
 STRANGLE_CUTOFF_HOUR   = 14       # strangles allowed until 14:45 — narrower than the 14:55 directional
 STRANGLE_CUTOFF_MIN    = 45       # cutoff; originally sized for overnight hold, now vestigial since
                                    # strangles flatten same-day too (kept as-is, not requested to change)

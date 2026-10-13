@@ -19,9 +19,8 @@ MAX_LOTS_DIRECTIONAL / MAX_LOTS_STRANGLE_LEG, and book profit in two steps
 along the way (₹5000 → 2 lots, ₹7500 → 2 more). A daily-loss hard stop at
 -₹DAILY_MAX_LOSS force-closes the open position, not just new entries.
 
-Directionals are flattened in one shot at EOD_FLATTEN (3:15 PM) every day.
-Strangles hold overnight normally, but also flatten at 3:15 PM on the day
-BEFORE their own expiry (margin doesn't improve waiting for expiry day itself).
+Everything — directionals and strangles — is flattened in one shot at
+EOD_FLATTEN (config.py; currently 3:25 PM) every day: purely intraday.
 No new strangles on Friday after 12 PM.
 
 Requires:
@@ -97,6 +96,9 @@ JOURNAL_FIELDS = [
     "hedge_strike", "hedge_entry_premium", "hedge_exit_premium",
     "lots", "main_pnl", "hedge_pnl", "net_pnl", "exit_reason",
 ]
+
+
+_EOD_LABEL = f"{EOD_FLATTEN_HOUR - 12}:{EOD_FLATTEN_MIN:02d} PM"   # derived from config so the text can't drift
 
 
 def _fmt_pnl(p: float) -> str:
@@ -708,7 +710,7 @@ def _close_directional_slice(trade, kite, spot, oc_exit, exit_qty, tag, time_lab
 
 def eod_flatten():
     """
-    3:15 PM — single full flatten of whatever's open, directional or
+    EOD_FLATTEN time (config.py) — single full flatten of whatever's open, directional or
     strangle, every trading day. Purely intraday: nothing is ever carried
     overnight, regardless of how close the position is to its own expiry.
     Replaces the old 2:55/3:25 split (which put half the exit 5 minutes from
@@ -749,7 +751,7 @@ def eod_flatten():
                 f"Manual action needed before close."
             )
             return
-        reason = "EOD flatten — 3:15 PM (purely intraday, no overnight holds)"
+        reason = f"EOD flatten — {_EOD_LABEL} (purely intraday, no overnight holds)"
         decision = ManagementDecision(action=EXIT_FULL, reason=reason, reasons=[reason], score=0)
         _handle_management_decision(decision, trade, spot, None, None, None, oc_exit, None)
         return
@@ -765,7 +767,7 @@ def eod_flatten():
 
     logger.info(f"EOD flatten: {trade.action} {trade.strike}")
     _close_directional_slice(trade, kite, spot, oc_exit, trade.lots,
-                              tag="EOD_FLATTEN", time_label="3:15 PM")
+                              tag="EOD_FLATTEN", time_label=_EOD_LABEL)
 
 
 def _register_strangle(signal, spot, oc):

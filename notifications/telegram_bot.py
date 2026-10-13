@@ -985,7 +985,7 @@ def send_trade_journal_entry(
         return f"+₹{p:,.0f}" if p >= 0 else f"−₹{abs(p):,.0f}"
 
     REASON_LABEL = {
-        "EOD_FLATTEN":    "3:15 PM EOD flatten",
+        "EOD_FLATTEN":    "End-of-day flatten",
         "SL_HIT":         "Stop loss hit",
         "MANAGEMENT_EXIT":"Position management exit",
         "STRANGLE_TARGET":     "Target hit — 65% premium decay",
