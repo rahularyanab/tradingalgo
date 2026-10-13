@@ -42,7 +42,9 @@ from typing import Optional
 import schedule
 
 from auth.kite_login import load_access_token
-from execution.order_manager import place_sell_order, place_buy_order, place_spread_entry
+from execution.order_manager import (
+    place_sell_order, place_buy_order, place_spread_entry, place_buy_limit_exact, modify_order_price,
+)
 from config import (
     MARKET_OPEN_HOUR, MARKET_OPEN_MIN,
     MARKET_CLOSE_HOUR, MARKET_CLOSE_MIN,
@@ -50,6 +52,7 @@ from config import (
     FORCE_EXIT_HOUR, FORCE_EXIT_MIN,
     EOD_FLATTEN_HOUR, EOD_FLATTEN_MIN, EOD_FLATTEN_RETRY_AFTER_MIN, EOD_VERIFY_AFTER_MIN,
     EXIT_VERIFY_DELAY_SEC, EXIT_VERIFY_REALERT_MIN, EXIT_VERIFY_GIVE_UP_MIN,
+    EXIT_CHASE_ENABLED, EXIT_CHASE_BUFFER_PCT, EXIT_CHASE_MIN_BUFFER,
     STRANGLE_CUTOFF_HOUR, STRANGLE_CUTOFF_MIN,
     FRIDAY_STRANGLE_CUTOFF, STRANGLE_SL_BUFFER,
     NIFTY_LOT_SIZE,
@@ -829,6 +832,66 @@ def _why_still_short(orders: list, symbol: str) -> str:
     return "no exit order found"
 
 
+def _chase_exit(kite, symbol: str, qty_cap: int, attempt: int, orders: list, live_qty: int):
+    """
+    Re-price an exit that did not fill. Returns (acted: bool, text: str).
+
+    Safety rails — this places REAL orders on its own:
+      * only ever buys back what is actually still short, and never more than
+        `qty_cap` (the leg's own size), so a manual short in the same symbol
+        is never touched beyond the bot's quantity;
+      * a resting exit order is MODIFIED in place (atomic) — never a second
+        order next to it; a fresh order is placed only when nothing is resting;
+      * skipped if the symbol is now part of a live trade (re-entered);
+      * limit rises with each attempt (EXIT_CHASE_BUFFER_PCT) and is based on a
+        fresh LTP; NFO market orders are not available through the API.
+    """
+    if not EXIT_CHASE_ENABLED:
+        return False, ""
+    if attempt >= len(EXIT_CHASE_BUFFER_PCT):
+        return False, "chase attempts used up"
+    if live_qty >= 0:
+        return False, ""
+    # never buy back a symbol the bot has since re-entered as a NEW live trade
+    live_syms = set()
+    t = monitor.trade
+    if t is not None:
+        live_syms.update(l["symbol"] for l in _trade_leg_specs(t))
+    if symbol in live_syms:
+        return False, "symbol is part of a new live trade — not chasing"
+    try:
+        ltp = float(kite.ltp([f"NFO:{symbol}"])[f"NFO:{symbol}"]["last_price"])
+    except Exception as e:
+        return False, f"no live price ({e}) — could not re-price"
+    if ltp <= 0:
+        return False, "no live price — could not re-price"
+
+    price = max(ltp * (1 + EXIT_CHASE_BUFFER_PCT[attempt]), ltp + EXIT_CHASE_MIN_BUFFER)
+    need  = min(abs(live_qty), qty_cap)
+    resting = [o for o in orders if o.get("tradingsymbol") == symbol
+               and o.get("transaction_type") == "BUY" and o.get("status") in ("OPEN", "TRIGGER PENDING")]
+    pending = sum(int(o.get("pending_quantity", o.get("quantity", 0)) or 0) for o in resting)
+    n = f"attempt {attempt + 1}/{len(EXIT_CHASE_BUFFER_PCT)}"
+
+    if resting:
+        if pending > need:
+            return False, f"resting exit is for {pending} but only {need} is needed — not touching it"
+        results = [modify_order_price(kite, o, price) for o in resting]
+        failed = [r.error for r in results if not r.success]
+        text = f"re-priced the resting exit to ₹{price:.2f} ({n}, market {ltp})"
+        if failed:
+            return False, f"could not re-price the resting exit: {failed[0]}"
+        if pending < need:                                  # part of it already filled / order smaller than needed
+            extra = place_buy_limit_exact(kite, symbol, need - pending, price)
+            text += f" and bought the remaining {need - pending}" if extra.success else f"; remaining {need - pending} FAILED: {extra.error}"
+        return True, text
+
+    r = place_buy_limit_exact(kite, symbol, need, price)
+    if r.success:
+        return True, f"placed a new exit BUY {need} @ ₹{price:.2f} ({n}, market {ltp})"
+    return False, f"new exit order FAILED: {r.error}"
+
+
 def _register_exit_verify(tag: str, trade: TradeState):
     """Queue a stop-type exit (SL / day floor) for a broker fill check."""
     if not trade.symbol or not trade.lots:
@@ -879,7 +942,13 @@ def verify_exit_fills(now: Optional[datetime] = None):
             continue
 
         giving_up = age_min >= EXIT_VERIFY_GIVE_UP_MIN
-        due_alert = e["last_alert"] is None or (now - e["last_alert"]).total_seconds() / 60 >= EXIT_VERIFY_REALERT_MIN
+        acted, chase_text = False, ""
+        if not giving_up:
+            acted, chase_text = _chase_exit(kite, e["symbol"], e["qty"], e.get("chases", 0), orders, q)
+            if acted:
+                e["chases"] = e.get("chases", 0) + 1
+        due_alert = (acted or e["last_alert"] is None
+                     or (now - e["last_alert"]).total_seconds() / 60 >= EXIT_VERIFY_REALERT_MIN)
         if due_alert or giving_up:
             try:
                 ltp = kite.ltp([f"NFO:{e['symbol']}"])[f"NFO:{e['symbol']}"]["last_price"]
@@ -889,8 +958,10 @@ def verify_exit_fills(now: Optional[datetime] = None):
             send_error_alert(
                 f"🚨 {e['kind']} NOT filled: {e['label']} ({e['symbol']}) still SHORT {abs(q)} at the broker "
                 f"(net position — includes any manual trades in this symbol) — {_why_still_short(orders, e['symbol'])}{mkt}. "
-                + ("Giving up on checking — close it manually NOW."
-                   if giving_up else "Close it manually; the bot checks again shortly.")
+                + (f"AUTO: the bot {chase_text}. Checking again shortly." if acted else
+                   (f"Auto re-price skipped: {chase_text}. " if chase_text else "")
+                   + ("Giving up on checking — close it manually NOW." if giving_up
+                      else "Close it manually; the bot checks again shortly."))
             )
             e["alerts"] += 1
             e["last_alert"] = now
@@ -927,7 +998,14 @@ def verify_eod_flatten(final: bool = False):
     for leg in _eod_verify:
         q = live.get(leg["symbol"], 0)
         if q < 0:
-            still.append(f"{leg['label']} ({leg['symbol']}) still SHORT {abs(q)} — {_why_still_short(orders, leg['symbol'])}")
+            why = _why_still_short(orders, leg["symbol"])
+            acted, chase_text = _chase_exit(kite, leg["symbol"], leg["qty"], leg.get("chases", 0), orders, q)
+            if acted:
+                leg["chases"] = leg.get("chases", 0) + 1
+            still.append(
+                f"{leg['label']} ({leg['symbol']}) still SHORT {abs(q)} — {why}"
+                + (f" — AUTO: the bot {chase_text}" if acted else (f" — auto re-price skipped: {chase_text}" if chase_text else ""))
+            )
 
     if still:
         send_error_alert(

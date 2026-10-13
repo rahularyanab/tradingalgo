@@ -102,6 +102,59 @@ def place_buy_order(
         return OrderResult(False, None, str(e), symbol, "BUY", quantity, product)
 
 
+def place_buy_limit_exact(
+    kite,
+    symbol:   str,
+    quantity: int,
+    price:    float,
+    product:  str = "NRML",
+    exchange: Optional[str] = None,
+) -> OrderResult:
+    """
+    BUY LIMIT at EXACTLY `price` (rounded up to the tick) — unlike
+    place_buy_order there is no internal +₹2 buffer. Used when chasing an
+    exit that did not fill, where the caller has chosen the price on purpose.
+    """
+    px = _tick(price, up=True)
+    try:
+        order_id = kite.place_order(
+            variety          = kite.VARIETY_REGULAR,
+            exchange         = exchange or kite.EXCHANGE_NFO,
+            tradingsymbol    = symbol,
+            transaction_type = kite.TRANSACTION_TYPE_BUY,
+            quantity         = quantity,
+            product          = product,
+            order_type       = kite.ORDER_TYPE_LIMIT,
+            price            = px,
+        )
+        logger.info(f"BUY (chase) order placed: {symbol}  qty={quantity}  price={px}  order_id={order_id}")
+        return OrderResult(True, str(order_id), None, symbol, "BUY", quantity, product)
+    except Exception as e:
+        logger.error(f"BUY (chase) order failed: {symbol}  error={e}")
+        return OrderResult(False, None, str(e), symbol, "BUY", quantity, product)
+
+
+def modify_order_price(kite, order: dict, price: float) -> OrderResult:
+    """
+    Re-price a RESTING order in place (atomic — unlike cancel + re-place there
+    is no window in which both, or neither, can fill). `order` is a dict from
+    kite.orders(); the price is rounded up to the tick (it is a BUY).
+    """
+    px = _tick(price, up=True)
+    symbol = order.get("tradingsymbol", "?")
+    try:
+        kite.modify_order(
+            variety  = order.get("variety") or kite.VARIETY_REGULAR,
+            order_id = order["order_id"],
+            price    = px,
+        )
+        logger.info(f"Order re-priced: {symbol}  order_id={order['order_id']}  {order.get('price')} -> {px}")
+        return OrderResult(True, str(order["order_id"]), None, symbol, "BUY", int(order.get("quantity", 0)), "NRML")
+    except Exception as e:
+        logger.error(f"Order re-price failed: {symbol}  order_id={order.get('order_id')}  error={e}")
+        return OrderResult(False, str(order.get("order_id")), str(e), symbol, "BUY", int(order.get("quantity", 0)), "NRML")
+
+
 def square_off_position(
     kite,
     symbol:   str,

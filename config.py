@@ -75,6 +75,12 @@ EOD_FLATTEN_RETRY_AFTER_MIN = 2   # second, identical flatten attempt this many 
                                    # no-op when nothing is open; it exists for a failed first attempt (chain fetch).
 EOD_VERIFY_AFTER_MIN = 1          # first "did the flatten actually fill?" check this many minutes after it (3:26);
                                    # a final check runs a minute before the close (3:29)
+# Auto re-pricing of a stuck exit (an SL / day-floor / EOD exit the broker has not filled). Each failed
+# fill check re-prices the resting order — or re-places it if it was rejected — more aggressively,
+# never for more than the leg's own size. Set EXIT_CHASE_ENABLED = False to go back to alert-only.
+EXIT_CHASE_ENABLED      = True
+EXIT_CHASE_BUFFER_PCT   = (0.03, 0.06, 0.10)   # attempt 1/2/3: limit = market * (1 + pct)
+EXIT_CHASE_MIN_BUFFER   = 3.0                  # ...and never less than market + this many rupees
 EXIT_VERIFY_DELAY_SEC     = 45    # stop-type exits (SL / day floor): first fill check this long after the exit
 EXIT_VERIFY_REALERT_MIN   = 2     # re-alert at this interval while the position is still open
 EXIT_VERIFY_GIVE_UP_MIN   = 6     # stop checking (with a last "check manually") this long after the exit
