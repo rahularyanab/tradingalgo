@@ -7,6 +7,10 @@ Supported commands (only from the configured TELEGRAM_CHAT_ID):
   /removesr <price> [resistance|support] — manually remove a level
   /pnl [YYYY-MM]   — daily P&L for the bot's own trades (default: this month)
   /params          — this user's settings (capital, daily limit, lots)
+  /pause           — stop NEW trades and added size (open positions stay protected)
+  /resume          — allow new trades again
+  /status          — paused or running, and any open trade
+  /pauseall, /resumeall — owner only: the same for EVERY bot on this server
   /start           — the welcome guide again
   /help            — list all commands
 """
@@ -35,6 +39,11 @@ _BOT_COMMANDS = [
     {"command": "removesr",  "description": "Remove a level: <price> [resistance|support]"},
     {"command": "pnl",       "description": "Daily P&L for bot trades (default: this month)"},
     {"command": "params",    "description": "Show your settings (capital, daily limit, lots)"},
+    {"command": "pause",     "description": "Pause: no new trades (open ones stay protected)"},
+    {"command": "resume",    "description": "Resume new trades"},
+    {"command": "status",    "description": "Paused or running, and any open trade"},
+    {"command": "pauseall",  "description": "Owner only: pause every bot on the server"},
+    {"command": "resumeall", "description": "Owner only: resume every bot on the server"},
     {"command": "start",     "description": "Show the welcome guide again"},
     {"command": "help",      "description": "List all commands"},
 ]
@@ -80,9 +89,39 @@ def _handle(text: str, chat_id: str) -> None:
             "`/removesr <price> [resistance|support]` — remove a level\n"
             "`/pnl [YYYY-MM]` — daily P&L for the bot's own trades (default: this month)\n"
             "`/params`   — your settings (capital, daily limit, lots)\n"
+            "`/pause`    — stop NEW trades; an open trade keeps its stop-loss and closes by 3:25 PM\n"
+            "`/resume`   — allow new trades again\n"
+            "`/status`   — paused or running, and any open trade\n"
+            + ("`/pauseall` / `/resumeall` — pause or resume EVERY bot on this server (owner)\n" if SETTINGS is None or SETTINGS.owner else "") +
             "`/start`    — the welcome guide again\n"
             "`/help`     — this message"
         ))
+
+    elif cmd in ("/pause", "/resume", "/status", "/pauseall", "/resumeall"):
+        import control
+        if cmd in ("/pauseall", "/resumeall") and not (SETTINGS is None or SETTINGS.owner):
+            _send(chat_id, "Only the owner can pause or resume every bot. Use /pause or /resume for your own bot.")
+            return
+        if cmd == "/pause":
+            changed = control.pause()
+            _send(chat_id, ("⏸ *Paused.*" if changed else "Already paused.") +
+                  "\nNo new trades and no added size. An open trade keeps its stop-loss and is still closed by 3:25 PM.\n"
+                  f"{control.open_trade_note()}\nSend /resume to continue.")
+        elif cmd == "/resume":
+            was_all = control.global_paused()
+            changed = control.resume()
+            if was_all:
+                _send(chat_id, "The owner has paused ALL bots on this server; /resume does not override that. You will be told when it lifts.")
+            else:
+                _send(chat_id, "▶️ *Resumed.* The bot will look for new trades again at the next scan." if changed else "Not paused — nothing to resume.")
+        elif cmd == "/pauseall":
+            control.pause_all()
+            _send(chat_id, "⏸ *ALL bots on this server are paused* (new trades only; open trades stay protected). Send /resumeall to lift it.")
+        elif cmd == "/resumeall":
+            _send(chat_id, "▶️ *All bots resumed* (any bot paused individually stays paused)." if control.resume_all() else "No server-wide pause was active.")
+        else:
+            paused, why = control.is_paused()
+            _send(chat_id, (f"⏸ *PAUSED* — {why}" if paused else "▶️ *Running*") + f"\n{control.open_trade_note()}")
 
     elif cmd in ("/start", "/params"):
         if SETTINGS is None:

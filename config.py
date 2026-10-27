@@ -188,6 +188,10 @@ MAX_SAME_DIR_REENTRIES   = 2     # max STRONG re-entries per direction per day
 LOW_PREMIUM_THRESHOLD = 50       # ₹ — below this, try next week's expiry first
 
 
+# ── Which broker this instance uses (set from the profile; the owner's own bot stays on Zerodha) ──
+BROKER       = "zerodha"         # "zerodha" | "angel"
+BROKER_PAPER = False             # Angel only: True = real market data, SIMULATED orders (see broker/angel_paper.py)
+
 # ── Starting-size ceiling for the per-user lot suggestion ─────────────────────
 MAX_START_LOTS = 3               # starting lots are never suggested above this — the size the strategy has been tested at
 

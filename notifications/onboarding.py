@@ -27,6 +27,8 @@ def params_message(st) -> str:
     t = z.thresholds
     lines = [
         f"*Your settings*",
+        *([ "🧪 *PAPER MODE* — the bot uses real market data from your broker but its orders are SIMULATED. No money is traded and nothing appears in your broker account. "
+            "Results are a little optimistic (no slippage)." ] if getattr(st, "paper", False) else []),
         f"Capital: *{_rs(z.capital)}*",
         f"Daily loss limit: *{_rs(z.daily_limit)}* ({z.limit_pct:.1f}% of capital) — when today's loss reaches this, "
         f"the bot closes everything and stops entering for the day",
@@ -80,6 +82,9 @@ def welcome_messages(st) -> list:
         "/params — show your settings",
         "/pnl — daily profit and loss of the bot's trades (this month)",
         "/sr — the support and resistance levels the bot is tracking",
+        "/pause — stop NEW trades if anything looks wrong (an open trade keeps its stop-loss and is closed by 3:25 PM)",
+        "/resume — allow new trades again",
+        "/status — is the bot paused or running, and is a trade open",
         "/start — show this guide again",
         "/help — list the commands",
         "",
@@ -89,6 +94,7 @@ def welcome_messages(st) -> list:
         "3. The daily loss limit is a target, not a guarantee. In a fast market the exit price can be worse; losses 30 to 50 percent beyond the limit have happened.",
         "4. If you see a warning about login or access, tell the person who set this up.",
         "5. This is a test programme, not investment advice. Options selling can lose money. Start small and watch it.",
+        *([ "6. You are in PAPER MODE: the owner will tell you when real orders are switched on." ] if getattr(st, "paper", False) else []),
     ])
     return [m1, m2, m3]
 
@@ -136,10 +142,9 @@ def send_broker_verified_once(st, post=None) -> bool:
         from notifications.telegram_bot import _post as post
     if paths.BROKER_OK_FLAG.exists():
         return False
-    ok = post(
-        f"🔌 *Broker connected* — your {st.broker.title()} session works and the first market scan completed. "
-        f"You are all set: the bot will trade on its own from 10:00 AM when its signals are met."
-    )
+    tail = ("Orders are SIMULATED (paper mode), so nothing is traded with real money." if getattr(st, "paper", False)
+            else "The bot will trade on its own from 10:00 AM when its signals are met.")
+    ok = post(f"🔌 *Broker connected* — your {st.broker.title()} session works and the first market scan completed. {tail}")
     if ok:
         try:
             paths.BROKER_OK_FLAG.write_text(datetime.now().isoformat(timespec="seconds"))

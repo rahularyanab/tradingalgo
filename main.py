@@ -42,6 +42,7 @@ from typing import Optional
 import schedule
 
 import paths as _paths
+import control as _control
 _paths.ensure_dirs()          # per-instance logs/ and data/ (no-op for the default instance)
 
 from auth.kite_login import load_access_token
@@ -336,6 +337,26 @@ _exit_verify: list = []        # stop-type exits (SL / day floor) awaiting a bro
 _STOP_EXIT_TAGS = {"SL_HIT", "DAILY_LOSS_BREAKER", "DAY_PROFIT_LOCK"}   # full exits that must be verified as filled
 
 
+_pause_reminded_date = None
+
+
+def _paused_now() -> bool:
+    """True while this bot (or every bot, via the owner) is paused: no new entries, no added size, no re-entry after a reversal.
+    Never consulted by anything protective (stops, exits, EOD flatten, fill checks)."""
+    return _control.is_paused()[0]
+
+
+def _pause_reminder():
+    """Once per day while paused, say so — a pause is easy to forget overnight."""
+    global _pause_reminded_date
+    paused, why = _control.is_paused()
+    today = datetime.now().date()
+    if not paused or _pause_reminded_date == today:
+        return
+    _pause_reminded_date = today
+    _post(f"⏸ *Bot is PAUSED* — {why}.\nNo new trades or added size today. {_control.open_trade_note()}\nSend /resume when you want it trading again.")
+
+
 _broker_ok_checked = False
 
 
@@ -354,9 +375,10 @@ def _announce_broker_ok():
 
 def _get_kite():
     global _kite, _kite_token
-    token = load_access_token()
+    import broker as _broker
+    token = _broker.load_token()
     if _kite is None or token != _kite_token:
-        _kite = get_kite_client(token)
+        _kite = _broker.make_client(token)
         _kite_token = token
     return _kite
 
@@ -1792,6 +1814,9 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
         return   # skip send_management_alert at the bottom
 
     elif decision.action == PYRAMID_ADD:
+        if _paused_now():
+            logger.info("PAUSED: pyramid add skipped (no size is added while paused).")
+            return
         add_lots = decision.lots or 0
         add_qty  = add_lots * NIFTY_LOT_SIZE
         if add_qty <= 0:
@@ -2016,6 +2041,10 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
         monitor.clear_trade()
         strangle_legs = None
 
+        if new_signal and new_signal.action != "NO_SIGNAL" and _paused_now():
+            logger.warning(f"PAUSED: the old position was closed but {new_signal.action} is NOT being entered.")
+            new_signal = None
+
         if new_signal and new_signal.action != "NO_SIGNAL":
             if new_signal.action == "STRANGLE" and _strangle_entry_allowed():
                 new_qty = new_signal.strangle_lots * NIFTY_LOT_SIZE
@@ -2075,6 +2104,8 @@ def run_scan():
         _day_pnl_reset_date = today
         _day_loss_alerted   = False
         _day_profit_locked  = False
+
+    _pause_reminder()
 
     logger.info("═" * 55)
     logger.info(f"Scan @ {datetime.now().strftime('%H:%M:%S')}")
@@ -2211,6 +2242,15 @@ def run_scan():
             if (monitor.trade and monitor.trade.action == "STRANGLE"
                     and strangle_legs and strangle_legs.remaining_leg is not None):
                 logger.info(f"Strangle single leg running: {strangle_legs.remaining_leg}")
+
+        # ── Paused: look, report, do not enter ────────────────────
+        elif _entry_allowed() and _paused_now():
+            final = combine_signals(
+                tl=tl_result, rsi=rsi_result, opt=opt_signal,
+                spot_price=spot, expiry=oc.weekly_expiry_date,
+            )
+            logger.info(f"PAUSED — not entering. Signal was {final.action} {final.score}/3.")
+            send_signal(final, observation=True)
 
         # ── New entry (no active trade) ───────────────────────────
         elif _entry_allowed() and _day_realised_pnl > _day_floor():
@@ -2360,6 +2400,13 @@ def main():
         if _missing:
             logger.error(f"Profile for {SETTINGS.name} is loaded but these secrets are missing in {_paths.ENV_FILE}: {', '.join(_missing)} — not starting.")
             sys.exit(2)
+        import broker as _broker
+        _ok, _why = _broker.live_gate(SETTINGS.broker, SETTINGS.paper, os.environ.get("ANGEL_CLIENT_CODE", ""))
+        if not _ok:
+            logger.error(f"LIVE ANGEL ORDERS REFUSED: {_why}. Run scripts/verify_angel.py in market hours, or set paper = true in the profile.")
+            _post(f"🚫 *Live trading is blocked* — {_why}.\nNothing was traded. The owner must run the Angel verification during market hours "
+                  f"(or switch this profile back to paper mode).")
+            sys.exit(3)
         logger.info(
             f"User profile: {SETTINGS.name} ({SETTINGS.broker})  capital ₹{SETTINGS.sizing.capital:,.0f}  "
             f"daily limit ₹{SETTINGS.sizing.daily_limit:,.0f}  lots {SETTINGS.sizing.lots_strong}/{SETTINGS.sizing.lots_moderate}"

@@ -29,6 +29,9 @@ ENV_FILE = (USER_DIR / ".env") if USER_DIR else None            # default instan
 PROFILE_FILE = (USER_DIR / "profile.toml") if USER_DIR else (ROOT / "profile.toml")
 ONBOARD_FLAG = HOME / ".onboarded.json"
 BROKER_OK_FLAG = HOME / ".broker_verified"
+PAUSE_FILE = HOME / ".paused"                       # this instance only   (/pause, /resume)
+GLOBAL_PAUSE_FILE = ROOT / "pause_all.flag"         # EVERY instance on this server, set by the owner (/pauseall, /resumeall)
+ANGEL_VERIFIED_FILE = HOME / ".angel_verified"      # written by scripts/verify_angel.py when it passes in market hours
 
 
 # Every secret the bot reads from the environment. In multi-user mode these are CLEARED before the
@@ -37,6 +40,7 @@ BROKER_OK_FLAG = HOME / ".broker_verified"
 SECRET_ENV_NAMES = (
     "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
     "KITE_API_KEY", "KITE_API_SECRET", "ZERODHA_USER_ID", "ZERODHA_PASSWORD", "ZERODHA_TOTP_SECRET",
+    "ANGEL_API_KEY", "ANGEL_CLIENT_CODE", "ANGEL_PASSWORD", "ANGEL_TOTP_SECRET",
 )
 
 

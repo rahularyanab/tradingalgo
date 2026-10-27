@@ -3,13 +3,14 @@ Per-user profile (profile.toml) -> bot settings.
 
 A user edits ONE small file; everything strategy-related stays under the owner's control.
 
-    [user]    name
+    [user]    name, owner                  owner = true lets this person pause every bot on the server
     [broker]  name                         "zerodha" (Angel One is added separately)
     [capital] total                        rupees allocated to this bot
     [risk]    max_daily_loss               optional, default 1% of capital, refused above 1.5%
               experience                   "new" (default) | "experienced"
               preferred_lots               optional starting lots for a STRONG signal
               allow_above_suggestion       default false
+              allow_pyramiding             default true; false = never add size to a winning trade
     [sizing]  margin_per_lot, loss_per_lot optional planning inputs
     [overrides]                            OWNER ONLY: any setting that exists in config.py
 
@@ -25,14 +26,14 @@ from pathlib import Path
 import sizing
 from sizing import ProfileError, Sizing
 
-SUPPORTED_BROKERS = {"zerodha"}                     # "angel" is added when its adapter exists and is verified
-PLANNED_BROKERS = {"angel"}
+SUPPORTED_BROKERS = {"zerodha", "angel"}
+PLANNED_BROKERS: set = set()
 
 _SCHEMA = {
-    "user":     {"name": str},
-    "broker":   {"name": str},
+    "user":     {"name": str, "owner": bool},
+    "broker":   {"name": str, "paper": bool},
     "capital":  {"total": (int, float)},
-    "risk":     {"max_daily_loss": (int, float), "experience": str, "preferred_lots": int, "allow_above_suggestion": bool},
+    "risk":     {"max_daily_loss": (int, float), "experience": str, "preferred_lots": int, "allow_above_suggestion": bool, "allow_pyramiding": bool},
     "sizing":   {"margin_per_lot": (int, float), "loss_per_lot": (int, float)},
     "overrides": None,                               # free-form, validated against config.py
 }
@@ -46,6 +47,8 @@ class Settings:
     sizing: Sizing
     config_values: dict               # config constant -> value to apply
     profile_hash: str                 # changes whenever the file's content changes
+    paper: bool = False               # simulated orders (Angel only)
+    owner: bool = False               # may pause EVERY bot on the server (/pauseall)
 
 
 def _type_name(t) -> str:
@@ -97,6 +100,9 @@ def validate(data: dict) -> list:
             errs.append(f'broker.name = "{broker}" is not available yet — only {", ".join(sorted(SUPPORTED_BROKERS))} works today.')
         else:
             errs.append(f'broker.name = "{broker}" is not supported. Choose one of: {", ".join(sorted(SUPPORTED_BROKERS))}.')
+    body = data.get("broker") if isinstance(data.get("broker"), dict) else {}
+    if body.get("paper") is True and broker and broker != "angel":
+        errs.append("broker.paper = true is only available with Angel. A Zerodha profile always places real orders.")
     return errs
 
 
@@ -137,6 +143,7 @@ def build(data: dict, config_ns: dict, raw_text: str = "") -> Settings:
         margin_per_lot=szg.get("margin_per_lot", 90_000.0),
         loss_per_lot=szg.get("loss_per_lot"),
         max_start_lots=int(config_ns.get("MAX_START_LOTS", 3)),
+        allow_pyramiding=risk.get("allow_pyramiding", True),
     )
     vals = {
         "DAILY_MAX_LOSS": int(s.daily_limit),
@@ -150,10 +157,14 @@ def build(data: dict, config_ns: dict, raw_text: str = "") -> Settings:
         "PROFIT_BOOK_STEP_LOTS": s.step_lots,
         **s.thresholds,
     }
+    broker = str(data["broker"]["name"]).strip().lower()
+    paper = bool(data["broker"].get("paper", broker == "angel"))     # Angel is paper-only until the owner says otherwise
+    vals.update({"BROKER": broker, "BROKER_PAPER": paper})
     vals.update(_check_overrides(data.get("overrides", {}), config_ns))     # owner overrides win
     return Settings(
         name=str(data.get("user", {}).get("name", "")).strip() or "there",
-        broker=str(data["broker"]["name"]).strip().lower(),
+        broker=broker, paper=paper,
+        owner=bool(data.get("user", {}).get("owner", False)),
         sizing=s, config_values=vals,
         profile_hash=hashlib.sha256((raw_text or repr(sorted(data.items()))).encode()).hexdigest()[:16],
     )
@@ -185,6 +196,7 @@ def apply_profile(config_ns: dict, path: Path | None = None, required: bool = Fa
 
 REQUIRED_SECRETS = {
     "zerodha": ["KITE_API_KEY", "KITE_API_SECRET", "ZERODHA_USER_ID", "ZERODHA_PASSWORD", "ZERODHA_TOTP_SECRET"],
+    "angel": ["ANGEL_API_KEY", "ANGEL_CLIENT_CODE", "ANGEL_PASSWORD", "ANGEL_TOTP_SECRET"],
 }
 ALWAYS_REQUIRED_SECRETS = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"]
 
@@ -195,18 +207,27 @@ def missing_secrets(broker: str, env: dict) -> list:
     return [k for k in need if not str(env.get(k, "")).strip()]
 
 
-def render_template(name: str, broker: str, capital: float, max_daily_loss=None, experience: str = "new", preferred_lots=None) -> str:
+def render_template(name: str, broker: str, capital: float, max_daily_loss=None, experience: str = "new", preferred_lots=None, paper=None,
+                    allow_pyramiding: bool = True, owner: bool = False, loss_per_lot=None) -> str:
     """A documented profile.toml with the given values filled in."""
     ml = f"max_daily_loss = {int(max_daily_loss)}" if max_daily_loss else "# max_daily_loss = 10000       # optional; default is 1% of your capital, the most we accept is 1.5%"
     pl = f"preferred_lots = {int(preferred_lots)}" if preferred_lots else "# preferred_lots = 2          # optional; default is the suggested size"
+    pp = ""
+    if broker == "angel":
+        pp = ("paper = " + ("false" if paper is False else "true") +
+              "                        # true = real Angel market data but SIMULATED orders (no money). Set false ONLY after scripts/verify_angel.py passes\n")
+    sz = (f"[sizing]\nloss_per_lot = {int(loss_per_lot)}                # what you accept ONE lot losing in a bad exit (default {int(sizing.PROFILES[experience][0])}). Lower = more risk than the bot assumes\n"
+          if loss_per_lot else "")
+    po = "" if allow_pyramiding else "allow_pyramiding = false          # never add size to a winning trade: you hold exactly your starting lots\n"
+    ow = "owner = true                       # may pause every bot on this server with /pauseall\n" if owner else ""
     return f"""# Your trading-bot profile. Edit the numbers, save, restart the bot. Secrets go in the .env file, NOT here.
 
 [user]
 name = "{name}"                     # used in Telegram messages
-
+{ow}
 [broker]
-name = "{broker}"                   # "zerodha" (Angel One is coming)
-
+name = "{broker}"                   # "zerodha" or "angel"
+{pp}
 [capital]
 total = {int(capital)}                    # rupees you allocate to this bot, in the broker account
 
@@ -215,10 +236,8 @@ total = {int(capital)}                    # rupees you allocate to this bot, in 
 experience = "{experience}"                # "new" = more cautious lot suggestion (use this for the first 1-2 months); "experienced" = less cautious
 {pl}
 # allow_above_suggestion = false   # keep false unless you accept losses above your daily limit
-
-# [sizing]                         # planning inputs, normally leave out
-# margin_per_lot = 90000
-# loss_per_lot = 4500
+{po}
+{sz if sz else "# [sizing]                         # planning inputs, normally leave out" + chr(10) + "# margin_per_lot = 90000" + chr(10) + "# loss_per_lot = 4500"}
 
 # [overrides]                      # OWNER ONLY: any setting from config.py, e.g.
 # PROFIT_LOCK_GIVEBACK_PCT = 0.35

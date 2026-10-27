@@ -88,6 +88,7 @@ def compute(
     margin_per_lot: float = 90_000.0,
     loss_per_lot: float | None = None,
     max_start_lots: int = 3,
+    allow_pyramiding: bool = True,
 ) -> Sizing:
     if experience not in PROFILES:
         raise ProfileError(f'risk.experience must be "new" or "experienced" (got {experience!r}).')
@@ -103,9 +104,14 @@ def compute(
     if lpl <= 0 or margin_per_lot <= 0:
         raise ProfileError("sizing.loss_per_lot and sizing.margin_per_lot must be positive.")
 
+    lower_lpl = lpl < base_loss
     min_abs = lpl / (HARD_LIMIT_PCT * fraction)          # smallest capital where 1 lot fits under the 1.5% ceiling
     min_comfy = lpl / (DEFAULT_LIMIT_PCT * fraction)     # ... under the normal 1%
     warnings, notes = [], []
+
+    if lower_lpl:
+        warnings.append(f"You told the bot one lot loses at most ₹{lpl:,.0f} in a bad exit; our experience is ₹{base_loss:,.0f}. "
+                        f"A fast market can take a single lot past your daily limit of ₹{float(max_daily_loss) if max_daily_loss else capital * DEFAULT_LIMIT_PCT:,.0f}.")
 
     # ── daily loss limit ──
     if max_daily_loss is None:
@@ -171,6 +177,8 @@ def compute(
 
     strong = eff
     moderate = moderate_lots(strong)
+    if not allow_pyramiding:
+        notes.append(f"Pyramiding is OFF: the bot never adds size to a winning trade, so you hold at most {strong} lot(s) (a strangle: {moderate} per side).")
     scale = strong / BASE_LOTS
     thresholds = {k: max(100, _round_nearest(v * scale, 100)) for k, v in BASE_THRESHOLDS.items()}
 
@@ -179,8 +187,8 @@ def compute(
         loss_per_lot=lpl, margin_per_lot=margin_per_lot,
         risk_lots=risk_lots, margin_lots=margin_lots, suggested_lots=suggested, effective_lots=eff,
         lots_strong=strong, lots_moderate=moderate, lots_strangle=moderate,
-        max_lots_directional=min(HARD_MAX_LOTS, 2 * strong),
-        max_lots_strangle_leg=min(4, 2 * moderate),
+        max_lots_directional=min(HARD_MAX_LOTS, 2 * strong) if allow_pyramiding else strong,
+        max_lots_strangle_leg=min(4, 2 * moderate) if allow_pyramiding else moderate,
         protected_max_lots=moderate, step_lots=moderate,
         thresholds=thresholds,
         margin_at_start=strong * margin_per_lot,

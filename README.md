@@ -65,3 +65,5 @@ This is a personal trading tool provided as-is, with no warranty. Options tradin
 ## Running for more than one person
 
 See [deploy/README.md](deploy/README.md): per-person profile file (`profile.example.toml`), automatic lot sizing from capital, Telegram welcome guide, and a provisioning script for a shared server.
+
+Brokers: Zerodha (live) and Angel One (paper mode first — see deploy/README.md and `scripts/verify_angel.py`).

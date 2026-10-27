@@ -1,5 +1,5 @@
 [Unit]
-Description=Zerodha Auto-Login for %i (daily token refresh)
+Description=Broker auto-login for %i (daily token refresh; Zerodha or Angel, from their profile)
 After=network-online.target
 Wants=network-online.target
 
@@ -8,7 +8,7 @@ Type=oneshot
 User=root
 WorkingDirectory=/opt/trading-algo
 Environment=ALGO_USER_DIR=/opt/algo-users/%i
-ExecStart=/opt/trading-algo/venv/bin/python scripts/auto_login.py
+ExecStart=/opt/trading-algo/venv/bin/python scripts/login.py
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=trading-login-%i

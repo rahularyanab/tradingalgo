@@ -23,27 +23,40 @@ sys.path.insert(0, str(ROOT))
 import userprofile                                   # noqa: E402  (does not import config)
 from sizing import ProfileError                      # noqa: E402
 
-ENV_TEMPLATE = """# SECRETS for {name} — never share, never commit. Fill every line.
+_ENV_HEAD = """# SECRETS for {name} — never share, never commit. Fill every line.
 
 # Telegram: create a bot with @BotFather (send /newbot) and paste its token. Then send any message to your bot
 # and find your numeric chat id with @userinfobot.
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 
-# Zerodha: your Kite Connect app (developers.kite.trade) and your login.
+"""
+ENV_BROKER = {
+    "zerodha": """# Zerodha: your Kite Connect app (developers.kite.trade) and your login.
 KITE_API_KEY=
 KITE_API_SECRET=
 ZERODHA_USER_ID=
 ZERODHA_PASSWORD=
 ZERODHA_TOTP_SECRET=
-"""
+""",
+    "angel": """# Angel One: your SmartAPI app (smartapi.angelone.in) and your login.
+ANGEL_API_KEY=
+ANGEL_CLIENT_CODE=
+ANGEL_PASSWORD=
+ANGEL_TOTP_SECRET=
+""",
+}
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("name", help="short id: letters, digits, - or _ (e.g. priya)")
     ap.add_argument("--capital", type=float, required=True, help="rupees allocated to the bot")
-    ap.add_argument("--broker", default="zerodha")
+    ap.add_argument("--broker", default="zerodha", choices=["zerodha", "angel"])
+    ap.add_argument("--live", action="store_true", help="Angel only: place REAL orders (default is paper mode with simulated orders)")
+    ap.add_argument("--loss-per-lot", type=float, default=None, help="what you accept one lot losing in a bad exit (default 4500 new / 3000 experienced); lowering it lets a small capital run 1 lot")
+    ap.add_argument("--no-pyramiding", action="store_true", help="never add size to a winning trade (hold exactly the starting lots)")
+    ap.add_argument("--owner", action="store_true", help="this person may pause EVERY bot on the server with /pauseall")
     ap.add_argument("--max-loss", type=float, default=None, help="daily loss limit; default 1%% of capital")
     ap.add_argument("--lots", type=int, default=None, help="preferred starting lots; default = suggested")
     ap.add_argument("--experience", choices=["new", "experienced"], default="new")
@@ -63,7 +76,8 @@ def main(argv=None) -> int:
         return 2
 
     text = userprofile.render_template(
-        a.display_name or a.name.title(), a.broker.lower(), a.capital, a.max_loss, a.experience, a.lots)
+        a.display_name or a.name.title(), a.broker.lower(), a.capital, a.max_loss, a.experience, a.lots, paper=(False if a.live else None),
+        allow_pyramiding=not a.no_pyramiding, owner=a.owner, loss_per_lot=a.loss_per_lot)
     try:                                              # validate BEFORE creating anything
         import importlib.util
         cfg_ns = {"MAX_START_LOTS": 3}
@@ -79,7 +93,7 @@ def main(argv=None) -> int:
     prof.write_text(text)
     env = d / ".env"
     if not env.exists():
-        env.write_text(ENV_TEMPLATE.format(name=a.name))
+        env.write_text((_ENV_HEAD + ENV_BROKER[a.broker.lower()]).format(name=a.name))
     os.chmod(env, stat.S_IRUSR | stat.S_IWUSR)        # 600
     seed = ROOT / "data" / "sr_levels.json"
     if not a.no_seed and seed.exists() and not (d / "data" / "sr_levels.json").exists():
@@ -94,7 +108,8 @@ Created {d}
   Starting lots      {z.lots_strong} strong / {z.lots_moderate} moderate   (suggested {z.suggested_lots}; risk rule {z.risk_lots}, margin rule {z.margin_lots})
   Strangle           {z.lots_strangle} lot(s) each side
   Grows only in profit up to {z.max_lots_directional} lots
-  Margin at start    about ₹{z.margin_at_start:,.0f}  ({100 * z.margin_at_start / z.capital:.0f}% of capital)""")
+  Margin at start    about ₹{z.margin_at_start:,.0f}  ({100 * z.margin_at_start / z.capital:.0f}% of capital)
+  Broker             {st.broker}{"  — PAPER MODE (simulated orders)" if st.paper else ""}""")
     for n in z.notes:
         print(f"  note: {n}")
     for w in z.warnings:

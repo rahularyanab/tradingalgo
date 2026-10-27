@@ -12,3 +12,8 @@ venv/
 
 # a per-user profile at the repo root would apply to the owner instance; never commit one
 /profile.toml
+
+# runtime switches
+pause_all.flag
+.paused
+.angel_verified
