@@ -12,7 +12,8 @@ WorkingDirectory=/opt/trading-algo
 Environment=ALGO_USER_DIR=/opt/algo-users/%i
 ExecStart=/opt/trading-algo/venv/bin/python main.py
 Restart=on-failure
-RestartPreventExitStatus=2 3        # 2 = missing secrets, 3 = live Angel not verified: restarting cannot fix either
+# 2 = missing secrets, 3 = live Angel not verified: restarting cannot fix either
+RestartPreventExitStatus=2 3
 RestartSec=30
 StandardOutput=journal
 StandardError=journal

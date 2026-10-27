@@ -391,7 +391,7 @@ check("a carried position (day buy/sell zero) keeps the broker's netqty", pos["S
 # ──────────────────────────────────────────────────────────────────────────────
 print("\n[8] deploy file")
 svc = (ROOT / "deploy" / "trading-bot@.service").read_text()
-check("no restart loop for exit 2 (secrets) or 3 (live gate)", "RestartPreventExitStatus=2 3" in svc)
+check("no restart loop for exit 2 (secrets) or 3 (live gate)", "RestartPreventExitStatus=2 3\n" in svc)
 
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
