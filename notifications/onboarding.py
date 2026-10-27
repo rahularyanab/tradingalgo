@@ -34,7 +34,8 @@ def params_message(st) -> str:
         f"the bot closes everything and stops entering for the day",
         f"Starting size: *{z.lots_strong} lot(s)* on a strong signal, *{z.lots_moderate}* on a moderate one",
         f"Strangle (when the market is range-bound): *{z.lots_strangle}* lot(s) each side",
-        f"Size can grow only while a trade is in profit, up to *{z.max_lots_directional}* lots",
+        (f"Size can grow only while a trade is in profit, up to *{z.max_lots_directional}* lots" if z.max_lots_directional > z.lots_strong
+         else "Size is *never added* to a trade — you hold exactly your starting lots"),
         f"Margin needed at your starting size: about {_rs(z.margin_at_start)} ({100 * z.margin_at_start / z.capital:.0f}% of capital)",
         f"Profit levels for your size: trailing lock from {_rs(t['PROFIT_LOCK_ARM_PNL'])}, profit booked at "
         f"{_rs(t['PROFIT_BOOK_STEP1_PNL'])} and {_rs(t['PROFIT_BOOK_STEP2_PNL'])}, day profit-lock arms at {_rs(t['DAY_PROFIT_ARM_PNL'])} banked",
