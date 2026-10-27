@@ -61,3 +61,7 @@ When running, the bot sends trade alerts and supports basic commands (`/sr`, `/a
 ## Disclaimer
 
 This is a personal trading tool provided as-is, with no warranty. Options trading carries substantial risk of loss. Nothing here is financial advice — use at your own risk.
+
+## Running for more than one person
+
+See [deploy/README.md](deploy/README.md): per-person profile file (`profile.example.toml`), automatic lot sizing from capital, Telegram welcome guide, and a provisioning script for a shared server.

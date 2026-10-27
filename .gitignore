@@ -9,3 +9,6 @@ paper_state.json
 venv/
 .venv/
 .DS_Store
+
+# a per-user profile at the repo root would apply to the owner instance; never commit one
+/profile.toml

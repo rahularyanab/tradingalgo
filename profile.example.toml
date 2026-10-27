@@ -1,0 +1,23 @@
+# Your trading-bot profile. Edit the numbers, save, restart the bot. Secrets go in the .env file, NOT here.
+
+[user]
+name = "Your Name"                     # used in Telegram messages
+
+[broker]
+name = "zerodha"                   # "zerodha" (Angel One is coming)
+
+[capital]
+total = 1000000                    # rupees you allocate to this bot, in the broker account
+
+[risk]
+# max_daily_loss = 10000       # optional; default is 1% of your capital, the most we accept is 1.5%
+experience = "new"                # "new" = more cautious lot suggestion (use this for the first 1-2 months); "experienced" = less cautious
+# preferred_lots = 2          # optional; default is the suggested size
+# allow_above_suggestion = false   # keep false unless you accept losses above your daily limit
+
+# [sizing]                         # planning inputs, normally leave out
+# margin_per_lot = 90000
+# loss_per_lot = 4500
+
+# [overrides]                      # OWNER ONLY: any setting from config.py, e.g.
+# PROFIT_LOCK_GIVEBACK_PCT = 0.35

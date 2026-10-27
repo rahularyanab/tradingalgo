@@ -25,7 +25,7 @@ from config import CLUSTER_BAND, SR_PROXIMITY_PCT
 
 logger = logging.getLogger(__name__)
 
-_DB_FILE = Path(__file__).parent / "sr_levels.json"
+from paths import SR_DB_FILE as _DB_FILE   # per-instance (see paths.py)
 
 
 @dataclass

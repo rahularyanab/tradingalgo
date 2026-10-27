@@ -13,7 +13,7 @@ from kiteconnect import KiteConnect
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import KITE_API_KEY, KITE_API_SECRET
 
-TOKEN_FILE = Path(__file__).resolve().parent.parent / ".access_token"
+from paths import TOKEN_FILE            # per-instance (see paths.py)
 
 
 def login():

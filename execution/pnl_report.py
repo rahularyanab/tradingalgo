@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
 
-JOURNAL_PATH = Path(__file__).parent.parent / "logs" / "trade_journal.csv"
+from paths import JOURNAL_FILE as JOURNAL_PATH   # per-instance (see paths.py)
 
 
 class DayPnL(NamedTuple):

@@ -1,0 +1,10 @@
+# systemctl enable --now trading-login@priya.timer
+[Unit]
+Description=Daily Zerodha login for %i at 8:45 AM IST (3:15 UTC)
+
+[Timer]
+OnCalendar=*-*-* 03:15:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

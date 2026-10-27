@@ -41,6 +41,9 @@ from typing import Optional
 
 import schedule
 
+import paths as _paths
+_paths.ensure_dirs()          # per-instance logs/ and data/ (no-op for the default instance)
+
 from auth.kite_login import load_access_token
 from execution.order_manager import (
     place_sell_order, place_buy_order, place_spread_entry, place_buy_limit_exact, modify_order_price,
@@ -59,7 +62,7 @@ from config import (
     DAILY_MAX_LOSS, REENTRY_COOLDOWN_CANDLES, MAX_SAME_DIR_REENTRIES,
     MAX_LOTS_DIRECTIONAL, MAX_LOTS_STRANGLE_LEG, LOW_PREMIUM_THRESHOLD,
     DAY_PROFIT_ARM_PNL, DAY_PROFIT_FLOOR, PROTECTED_MAX_LOTS, PROTECTED_DELTA_EST,
-    GUARD_INTERVAL_SECONDS,
+    GUARD_INTERVAL_SECONDS, SETTINGS,
     LATE_ENTRY_HOUR, LATE_ENTRY_MIN, LATE_ENTRY_SIZE_FACTOR,
 )
 from data.market_data import get_kite_client, fetch_nifty_candles, get_current_nifty_price
@@ -86,7 +89,7 @@ logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("logs/bot.log"),
+        logging.FileHandler(_paths.BOT_LOG),
     ],
 )
 logger = logging.getLogger("main")
@@ -333,6 +336,22 @@ _exit_verify: list = []        # stop-type exits (SL / day floor) awaiting a bro
 _STOP_EXIT_TAGS = {"SL_HIT", "DAILY_LOSS_BREAKER", "DAY_PROFIT_LOCK"}   # full exits that must be verified as filled
 
 
+_broker_ok_checked = False
+
+
+def _announce_broker_ok():
+    """Per-user instances: the first scan that got market data through the broker confirms the connection on Telegram."""
+    global _broker_ok_checked
+    if _broker_ok_checked or SETTINGS is None:
+        return
+    _broker_ok_checked = True
+    try:
+        from notifications import onboarding
+        onboarding.send_broker_verified_once(SETTINGS)
+    except Exception as e:
+        logger.warning(f"Broker-verified notice failed: {e}")
+
+
 def _get_kite():
     global _kite, _kite_token
     token = load_access_token()
@@ -480,7 +499,7 @@ def _floor_breach_decision(total_today: float, unrealised_now: float) -> Managem
     return ManagementDecision(action=EXIT_FULL, reason=reason, reasons=[reason], score=0)
 
 
-_STATE_FILE = Path(__file__).parent / "logs" / "algo_trade_state.json"
+_STATE_FILE = _paths.STATE_FILE
 
 
 def _save_state():
@@ -2064,6 +2083,7 @@ def run_scan():
         kite = _get_kite()
 
         df   = fetch_nifty_candles(kite)
+        _announce_broker_ok()
         spot = get_current_nifty_price(kite)
         oc   = fetch_option_chain(kite=kite)
 
@@ -2334,7 +2354,20 @@ def main():
         f"{int(LATE_ENTRY_SIZE_FACTOR * 100)}% (min 1 lot)"
     )
 
+    if SETTINGS is not None:
+        import os, userprofile
+        _missing = userprofile.missing_secrets(SETTINGS.broker, os.environ)
+        if _missing:
+            logger.error(f"Profile for {SETTINGS.name} is loaded but these secrets are missing in {_paths.ENV_FILE}: {', '.join(_missing)} — not starting.")
+            sys.exit(2)
+        logger.info(
+            f"User profile: {SETTINGS.name} ({SETTINGS.broker})  capital ₹{SETTINGS.sizing.capital:,.0f}  "
+            f"daily limit ₹{SETTINGS.sizing.daily_limit:,.0f}  lots {SETTINGS.sizing.lots_strong}/{SETTINGS.sizing.lots_moderate}"
+        )
     start_command_listener()
+    if SETTINGS is not None:                       # a per-user instance: greet the user on Telegram (once)
+        from notifications import onboarding
+        onboarding.send_welcome_once(SETTINGS)
     _restore_positions_from_kite()
     run_scan()
 

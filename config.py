@@ -1,7 +1,9 @@
 import os
-from dotenv import load_dotenv
+import paths
 
-load_dotenv()
+# This instance's secrets. In a multi-user setup ONLY that person's own .env is read: inherited
+# secrets are cleared first, so a key missing from their file can never fall back to the owner's.
+paths.load_instance_env()
 
 # ── Zerodha credentials ───────────────────────────────────────────
 KITE_API_KEY    = os.getenv("KITE_API_KEY", "")
@@ -184,3 +186,15 @@ MAX_SAME_DIR_REENTRIES   = 2     # max STRONG re-entries per direction per day
 # trade — keeps something on screen without letting a thin-premium position
 # scale up into an Aug-20-style loss.
 LOW_PREMIUM_THRESHOLD = 50       # ₹ — below this, try next week's expiry first
+
+
+# ── Starting-size ceiling for the per-user lot suggestion ─────────────────────
+MAX_START_LOTS = 3               # starting lots are never suggested above this — the size the strategy has been tested at
+
+# ── Per-user profile (optional) ───────────────────────────────────────────────
+# With no profile.toml (the owner's own instance) NOTHING above changes. With one, the
+# user's capital / daily limit / lots are turned into the matching settings above — see
+# userprofile.py and sizing.py. Must stay the LAST thing in this file.
+import userprofile as _userprofile
+SETTINGS = _userprofile.apply_profile(globals(), required=paths.USER_DIR is not None)
+

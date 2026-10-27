@@ -1,0 +1,22 @@
+# One bot per person on the shared server:   systemctl enable --now trading-bot@priya
+# (the owner's own bot stays as trading-bot.service and is not part of this)
+[Unit]
+Description=Nifty Options Trading Bot (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/trading-algo
+Environment=ALGO_USER_DIR=/opt/algo-users/%i
+ExecStart=/opt/trading-algo/venv/bin/python main.py
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=trading-bot-%i
+# No EnvironmentFile on purpose: config.py reads ONLY this person's own .env, never the owner's.
+
+[Install]
+WantedBy=multi-user.target

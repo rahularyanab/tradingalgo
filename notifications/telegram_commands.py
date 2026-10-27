@@ -6,6 +6,8 @@ Supported commands (only from the configured TELEGRAM_CHAT_ID):
   /addsr <price> <resistance|support>    — manually add/reinforce a level
   /removesr <price> [resistance|support] — manually remove a level
   /pnl [YYYY-MM]   — daily P&L for the bot's own trades (default: this month)
+  /params          — this user's settings (capital, daily limit, lots)
+  /start           — the welcome guide again
   /help            — list all commands
 """
 
@@ -17,7 +19,7 @@ from datetime import datetime
 
 import requests
 
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, SETTINGS
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,8 @@ _BOT_COMMANDS = [
     {"command": "addsr",     "description": "Add/reinforce a level: <price> <resistance|support>"},
     {"command": "removesr",  "description": "Remove a level: <price> [resistance|support]"},
     {"command": "pnl",       "description": "Daily P&L for bot trades (default: this month)"},
+    {"command": "params",    "description": "Show your settings (capital, daily limit, lots)"},
+    {"command": "start",     "description": "Show the welcome guide again"},
     {"command": "help",      "description": "List all commands"},
 ]
 
@@ -75,8 +79,21 @@ def _handle(text: str, chat_id: str) -> None:
             "`/addsr <price> <resistance|support>` — add/reinforce a level\n"
             "`/removesr <price> [resistance|support]` — remove a level\n"
             "`/pnl [YYYY-MM]` — daily P&L for the bot's own trades (default: this month)\n"
+            "`/params`   — your settings (capital, daily limit, lots)\n"
+            "`/start`    — the welcome guide again\n"
             "`/help`     — this message"
         ))
+
+    elif cmd in ("/start", "/params"):
+        if SETTINGS is None:
+            _send(chat_id, "This bot runs without a user profile (owner mode), so there are no per-user settings to show.")
+            return
+        from notifications import onboarding
+        if cmd == "/params":
+            _send(chat_id, onboarding.params_message(SETTINGS))
+        else:
+            for m in onboarding.welcome_messages(SETTINGS):
+                _send(chat_id, m)
 
     elif cmd == "/sr":
         from data.sr_database import summary as sr_summary
