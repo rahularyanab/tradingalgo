@@ -679,6 +679,57 @@ def _restore_positions_from_kite():
     )
 
 
+def _unwind_hedge_slice(kite, oc, opt_type: str, hedge_symbol, hedge_strike, hedge_entry, qty: int, what: str):
+    """
+    Sell back `qty` shares of a far-OTM hedge after the matching quantity of the
+    sold option has been bought back (buy-back FIRST, so the position is never
+    briefly under-hedged). A partial exit used to buy back the sold lots and leave
+    the WHOLE hedge standing: 3 lots of hedge stayed open against 1 lot of short,
+    and the final exit only sold what was left of the short's size, so the booked
+    slice's hedge was never closed at all.
+
+    Returns (hedge_exit_ltp, hedge_pnl, ok, note). ok=False means the hedge order
+    was rejected (or there was nothing to sell with) — the caller keeps going but
+    the note goes into the alert so it can be squared off by hand.
+    """
+    if not hedge_symbol or not hedge_strike or qty <= 0:
+        return None, 0.0, True, ""
+    hsd = (oc.call_data if opt_type == "CE" else oc.put_data).get(hedge_strike) if oc else None
+    ltp = hsd.ltp if hsd and hsd.ltp > 0 else None
+    price = _sell_price(oc, opt_type, hedge_strike) if oc else None
+    if price is None:
+        # The option chain doesn't carry this far-OTM strike (Oct 27: 21450 PE). With no price the
+        # order goes out as a MARKET order, which Kite refuses for NFO via the API — the hedge
+        # stayed open and nothing said so. Price it from the live quote instead.
+        try:
+            q = float(kite.ltp([f"NFO:{hedge_symbol}"])[f"NFO:{hedge_symbol}"]["last_price"])
+            if q > 0:
+                ltp = ltp or q
+                price = max(math.floor((q - 1) / 0.05) * 0.05, 0.05)
+        except Exception:
+            pass
+    if price is None:
+        send_error_alert(
+            f"⚠️ {what}: no price available for hedge {hedge_symbol} x{qty} — it was NOT sold. "
+            f"Square it off manually."
+        )
+        return None, 0.0, False, f"hedge {hedge_symbol} x{qty} NOT sold (no price)"
+    try:
+        r = place_sell_order(kite, hedge_symbol, qty, price=price)
+    except Exception as e:
+        send_error_alert(f"{what}: hedge unwind order error ({hedge_symbol} x{qty}): {e}")
+        return None, 0.0, False, f"hedge {hedge_symbol} x{qty} NOT sold ({e})"
+    if not r.success:
+        send_error_alert(
+            f"⚠️ {what}: sold leg bought back but the matching HEDGE {hedge_symbol} x{qty} was NOT sold "
+            f"({r.error}) — square it off manually."
+        )
+        return None, 0.0, False, f"hedge {hedge_symbol} x{qty} NOT sold"
+    pnl = (ltp - hedge_entry) * qty if ltp is not None and hedge_entry is not None else 0.0
+    px = f"₹{ltp:.2f}" if ltp is not None else "~market"
+    return ltp, pnl, True, f"hedge {hedge_symbol} x{qty} sold @ {px}"
+
+
 def _close_directional_slice(trade, kite, spot, oc_exit, exit_qty, tag, time_label):
     """Buy back `exit_qty` shares of the sold leg (and unwind the matching hedge
     quantity), record P&L, and close the trade."""
@@ -694,10 +745,9 @@ def _close_directional_slice(trade, kite, spot, oc_exit, exit_qty, tag, time_lab
             if not r.success:
                 send_error_alert(f"Force exit order failed: {r.error}")
             if trade.hedge_symbol and trade.hedge_strike and oc_exit:
-                hsd = (oc_exit.call_data if opt_type == "CE" else oc_exit.put_data).get(trade.hedge_strike)
-                hedge_exit_ltp = hsd.ltp if hsd and hsd.ltp > 0 else None
-                hp = _sell_price(oc_exit, opt_type, trade.hedge_strike)
-                place_sell_order(kite, trade.hedge_symbol, exit_qty, price=hp)
+                hedge_exit_ltp, _, _, _ = _unwind_hedge_slice(
+                    kite, oc_exit, opt_type, trade.hedge_symbol, trade.hedge_strike, trade.hedge_entry_premium,
+                    exit_qty, f"{tag} exit {trade.action} {trade.strike}")
         except Exception as e:
             send_error_alert(f"Force exit order error: {e}")
 
@@ -1229,11 +1279,9 @@ def _check_sl_hit(kite, trade: TradeState, spot: float, oc=None) -> bool:
             ep = _buy_price(oc, opt_type, trade.strike) if oc else None
             place_buy_order(kite, trade.symbol, trade.lots, price=ep)
             if trade.hedge_symbol and trade.hedge_strike:
-                if oc:
-                    hsd = (oc.call_data if opt_type == "CE" else oc.put_data).get(trade.hedge_strike)
-                    hedge_exit_ltp = hsd.ltp if hsd and hsd.ltp > 0 else None
-                hp = _sell_price(oc, opt_type, trade.hedge_strike) if oc else None
-                place_sell_order(kite, trade.hedge_symbol, trade.lots, price=hp)
+                hedge_exit_ltp, _, _, _ = _unwind_hedge_slice(
+                    kite, oc, opt_type, trade.hedge_symbol, trade.hedge_strike, trade.hedge_entry_premium,
+                    trade.lots, f"SL exit {trade.action} {trade.strike}")
         except Exception as e:
             send_error_alert(f"SL exit order error: {e}")
 
@@ -1650,6 +1698,18 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
                 )
                 return
             locked_pnl = ce_pnl + pe_pnl
+            # Both short legs are covered — now take the matching slice off each leg's hedge.
+            hedge_pnl, hedge_notes = 0.0, []
+            if book_qty > 0 and legs.ce_active:
+                _, hp_, _, note_ = _unwind_hedge_slice(kite, oc, "CE", legs.hedge_ce_symbol, legs.hedge_ce_strike,
+                                                       legs.hedge_ce_entry_premium, book_qty,
+                                                       f"Profit-book STRANGLE CE {legs.ce_strike}")
+                hedge_pnl += hp_; hedge_notes.append(note_) if note_ else None
+            if book_qty > 0 and legs.pe_active:
+                _, hp_, _, note_ = _unwind_hedge_slice(kite, oc, "PE", legs.hedge_pe_symbol, legs.hedge_pe_strike,
+                                                       legs.hedge_pe_entry_premium, book_qty,
+                                                       f"Profit-book STRANGLE PE {legs.pe_strike}")
+                hedge_pnl += hp_; hedge_notes.append(note_) if note_ else None
             step = 1 if not trade.profit_booked_step1 else 2
             monitor.trade.lots -= book_qty
             if step == 1:
@@ -1660,15 +1720,17 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
                 f"🔒 *PROFIT BOOKED — step {step}*\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"Booked *{book_lots} lot(s)* off *STRANGLE {legs.ce_strike}/{legs.pe_strike}*\n"
-                f"💰 Locked: *{_fmt_pnl(locked_pnl)}*\n"
-                f"\n"
+                f"💰 Locked: *{_fmt_pnl(locked_pnl + hedge_pnl)}*\n"
+                + "".join(f"🛡 {n}\n" for n in hedge_notes)
+                + f"\n"
                 f"📌 *{monitor.trade.lots // NIFTY_LOT_SIZE} lot(s) still running*"
                 f"{' to EOD' if step == 2 else ''}\n"
                 f"━━━━━━━━━━━━━━━━━━━━"
             )
             logger.info(f"Profit-book step {step}: {book_lots} lot(s) each leg, {monitor.trade.lots} shares remaining")
             journal_trade = replace(trade, lots=book_qty)
-            _record_trade_exit(journal_trade, ce_exit_ltp or pe_exit_ltp, None, locked_pnl, 0.0, locked_pnl, spot, "PROFIT_BOOK")
+            _record_trade_exit(journal_trade, ce_exit_ltp or pe_exit_ltp, None, locked_pnl, hedge_pnl,
+                               locked_pnl + hedge_pnl, spot, "PROFIT_BOOK")
         elif book_qty > 0:
             sd = (oc.call_data if opt_type == "CE" else oc.put_data).get(trade.strike)
             exit_ltp = sd.ltp if sd and sd.ltp > 0 else None
@@ -1677,6 +1739,11 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
                 send_error_alert(f"Profit-book order failed: {r.error}")
             else:
                 locked_pnl = (trade.entry_premium - (exit_ltp or trade.entry_premium)) * book_qty
+                # Take the matching slice of the hedge off too (same quantity as the short just covered).
+                hedge_exit_ltp, hedge_pnl, hedge_ok, hedge_note = _unwind_hedge_slice(
+                    kite, oc, opt_type, trade.hedge_symbol, trade.hedge_strike, trade.hedge_entry_premium,
+                    book_qty, f"Profit-book {trade.action} {trade.strike}",
+                )
                 step = 1 if not trade.profit_booked_step1 else 2
                 monitor.trade.lots -= book_qty
                 if step == 1:
@@ -1690,14 +1757,19 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
                     f"━━━━━━━━━━━━━━━━━━━━\n"
                     f"Exited *{book_lots} lot(s)* of {trade.action.replace('_',' ')} {trade.strike}\n"
                     f"Entry ₹{trade.entry_premium:.2f} → Exit *{locked_s}*\n"
-                    f"💰 Locked: *{_fmt_pnl(locked_pnl)}*\n"
-                    f"\n"
+                    f"💰 Locked: *{_fmt_pnl(locked_pnl + hedge_pnl)}*"
+                    + (f"  (short {_fmt_pnl(locked_pnl)}, hedge {_fmt_pnl(hedge_pnl)})" if trade.hedge_symbol and hedge_ok else "")
+                    + "\n"
+                    + (f"🛡 Hedge: {hedge_note}\n" if hedge_note else "")
+                    + f"\n"
                     f"📌 *{remaining_lots} lot(s) still running*{' to EOD' if step == 2 else ''}\n"
                     f"━━━━━━━━━━━━━━━━━━━━"
                 )
-                logger.info(f"Profit-book step {step}: {book_lots} lot(s) exited @ {exit_ltp}, {monitor.trade.lots} shares remaining")
+                logger.info(f"Profit-book step {step}: {book_lots} lot(s) exited @ {exit_ltp}, {monitor.trade.lots} shares remaining"
+                            + (f" — {hedge_note}" if hedge_note else ""))
                 journal_trade = replace(trade, lots=book_qty)
-                _record_trade_exit(journal_trade, exit_ltp, None, locked_pnl, 0.0, locked_pnl, spot, "PROFIT_BOOK")
+                _record_trade_exit(journal_trade, exit_ltp, hedge_exit_ltp, locked_pnl, hedge_pnl,
+                                   locked_pnl + hedge_pnl, spot, "PROFIT_BOOK")
         return   # skip send_management_alert at the bottom
 
     elif decision.action == PYRAMID_ADD:
@@ -1865,9 +1937,9 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
                 r = place_buy_order(kite, trade.symbol, qty, price=_buy_price(oc, opt_type, trade.strike))
                 if not r.success: send_error_alert(f"Exit order failed: {r.error}")
                 if trade.hedge_symbol and trade.hedge_strike:
-                    hsd = (oc.call_data if opt_type == "CE" else oc.put_data).get(trade.hedge_strike)
-                    hedge_exit_ltp = hsd.ltp if hsd and hsd.ltp > 0 else None
-                    place_sell_order(kite, trade.hedge_symbol, qty, price=_sell_price(oc, opt_type, trade.hedge_strike))
+                    hedge_exit_ltp, _, _, _ = _unwind_hedge_slice(
+                        kite, oc, opt_type, trade.hedge_symbol, trade.hedge_strike, trade.hedge_entry_premium,
+                        qty, f"Exit {trade.action} {trade.strike}")
         if trade.action != "STRANGLE":
             main_pnl  = (trade.entry_premium - (exit_ltp or trade.entry_premium)) * qty
             hedge_pnl = (
@@ -1920,7 +1992,8 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
                 r = place_buy_order(kite, trade.symbol, qty, price=_buy_price(oc, opt_type, trade.strike))
                 if not r.success: send_error_alert(f"Exit order failed: {r.error}")
                 if trade.hedge_symbol and trade.hedge_strike:
-                    place_sell_order(kite, trade.hedge_symbol, qty, price=_sell_price(oc, opt_type, trade.hedge_strike))
+                    _unwind_hedge_slice(kite, oc, opt_type, trade.hedge_symbol, trade.hedge_strike,
+                                        trade.hedge_entry_premium, qty, f"Reversal exit {trade.action} {trade.strike}")
         monitor.clear_trade()
         strangle_legs = None
 
