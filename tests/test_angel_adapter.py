@@ -27,7 +27,7 @@ import requests                                       # noqa: E402
 
 from broker import angel as A                         # noqa: E402
 from broker.angel import AngelClient, AngelError, AngelSessionError   # noqa: E402
-from broker.angel_instruments import InstrumentTable, reduce_master, to_kite, parse_expiry   # noqa: E402
+from broker.angel_instruments import InstrumentTable, reduce_master, to_kite, parse_expiry, stream_reduce   # noqa: E402
 from broker.angel_paper import PaperLedger            # noqa: E402
 
 PASS, FAIL = [], []
@@ -79,6 +79,14 @@ tbl3 = InstrumentTable(home / "i.json", http=type("H", (), {"get": staticmethod(
 check("next day with the download failing: falls back to the stale cache instead of having no instruments", len(tbl3.kite_instruments()) == n)
 tbl4 = InstrumentTable(home / "none.json", http=type("H", (), {"get": staticmethod(lambda url, timeout=0: (_ for _ in ()).throw(RuntimeError("offline")))})())
 check("no cache and no download → a clear error", raises(RuntimeError, tbl4.load) is not None)
+blob = json.dumps(ROWS, ensure_ascii=False).encode()
+same = True
+for size in (1, 7, 64, 1000, len(blob) + 5):               # chunk boundaries everywhere, including inside multi-byte text and numbers
+    chunks = [blob[i:i + size] for i in range(0, len(blob), size)]
+    same = same and stream_reduce(chunks) == reduce_master(ROWS)
+check("streaming the master in tiny chunks gives EXACTLY the same rows as loading it whole", same)
+check("streaming: pretty-printed / newline-separated JSON also works", stream_reduce([json.dumps(ROWS, indent=2).encode()]) == reduce_master(ROWS))
+check("streaming: an empty array and a non-array are handled", stream_reduce([b"[]"]) == [] and raises(ValueError, stream_reduce, [b'{"a":1}']) is not None)
 check("resolve: index key, option symbol, unknown", tbl.resolve("NSE:NIFTY 50") == ("NSE", "Nifty 50", "99926000") and tbl.resolve(f"NFO:{sym(EXP1, 22800, 'PE')}")[0] == "NFO" and tbl.resolve("NFO:NOPE") is None)
 
 print("\n[2] HTTP layer")

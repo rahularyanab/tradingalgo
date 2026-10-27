@@ -63,6 +63,39 @@ def reduce_master(rows: list, names=KEEP_NAMES) -> list:
     return out
 
 
+def stream_reduce(chunks, names=KEEP_NAMES) -> list:
+    """
+    reduce_master() over a JSON array arriving as byte chunks, one object at a time. The full master is ~40 MB of JSON
+    (hundreds of MB as Python objects); the bot's server has under 500 MB of RAM, so it must never be held whole.
+    """
+    import codecs
+    dec, rd = json.JSONDecoder(), codecs.getincrementaldecoder("utf-8")()
+    buf, out, started = "", [], False
+    for chunk in chunks:
+        buf += rd.decode(chunk)
+        i = 0
+        while True:
+            while i < len(buf) and buf[i] in " \t\r\n,":
+                i += 1
+            if not started:
+                if i < len(buf):
+                    if buf[i] != "[":
+                        raise ValueError("instrument master is not a JSON array")
+                    started, i = True, i + 1
+                    continue
+                break
+            if i >= len(buf) or buf[i] == "]":
+                break
+            try:
+                obj, j = dec.raw_decode(buf, i)
+            except json.JSONDecodeError:
+                break                                        # object continues in the next chunk
+            out.extend(reduce_master([obj], names))
+            i = j
+        buf = buf[i:]
+    return out
+
+
 def to_kite(row: dict) -> dict | None:
     """One master row -> a Kite-shaped instrument dict (None if unusable)."""
     sym = row.get("symbol") or ""
@@ -103,6 +136,10 @@ class InstrumentTable:
         import requests
         http = self.http or requests
         logger.info("Downloading Angel instrument master (once a day)…")
+        if self.http is None:                                # real network: stream it, never hold the whole master
+            with requests.get(SCRIP_MASTER_URL, timeout=90, stream=True) as r:
+                r.raise_for_status()
+                return stream_reduce(r.iter_content(chunk_size=65536))
         r = http.get(SCRIP_MASTER_URL, timeout=90)
         r.raise_for_status()
         return reduce_master(r.json())
