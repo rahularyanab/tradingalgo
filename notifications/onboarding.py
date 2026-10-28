@@ -40,6 +40,9 @@ def params_message(st) -> str:
         f"Profit levels for your size: trailing lock from {_rs(t['PROFIT_LOCK_ARM_PNL'])}, profit booked at "
         f"{_rs(t['PROFIT_BOOK_STEP1_PNL'])} and {_rs(t['PROFIT_BOOK_STEP2_PNL'])}, day profit-lock arms at {_rs(t['DAY_PROFIT_ARM_PNL'])} banked",
     ]
+    lim = int(st.config_values.get("ENTRY_FAIL_LIMIT", 0) or 0)
+    if lim > 0:
+        lines.append(f"If *{lim}* entry attempts fail in a day (for example the broker rejects an order for lack of margin), the bot stops entering for that day and tells you. /resume gives it a fresh start.")
     for n in z.notes:
         lines.append(f"ℹ️ {n}")
     for w in z.warnings:

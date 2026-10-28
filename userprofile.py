@@ -208,7 +208,7 @@ def missing_secrets(broker: str, env: dict) -> list:
 
 
 def render_template(name: str, broker: str, capital: float, max_daily_loss=None, experience: str = "new", preferred_lots=None, paper=None,
-                    allow_pyramiding: bool = True, owner: bool = False, loss_per_lot=None) -> str:
+                    allow_pyramiding: bool = True, owner: bool = False, loss_per_lot=None, max_failed_entries=None) -> str:
     """A documented profile.toml with the given values filled in."""
     ml = f"max_daily_loss = {int(max_daily_loss)}" if max_daily_loss else "# max_daily_loss = 10000       # optional; default is 1% of your capital, the most we accept is 1.5%"
     pl = f"preferred_lots = {int(preferred_lots)}" if preferred_lots else "# preferred_lots = 2          # optional; default is the suggested size"
@@ -218,6 +218,8 @@ def render_template(name: str, broker: str, capital: float, max_daily_loss=None,
               "                        # true = real Angel market data but SIMULATED orders (no money). Set false ONLY after scripts/verify_angel.py passes\n")
     sz = (f"[sizing]\nloss_per_lot = {int(loss_per_lot)}                # what you accept ONE lot losing in a bad exit (default {int(sizing.PROFILES[experience][0])}). Lower = more risk than the bot assumes\n"
           if loss_per_lot else "")
+    ov = (f"[overrides]                        # OWNER ONLY: any setting from config.py\nENTRY_FAIL_LIMIT = {int(max_failed_entries)}                 # after this many failed entry attempts in a day, stop entering until tomorrow\n"
+          if max_failed_entries else "# [overrides]                      # OWNER ONLY: any setting from config.py, e.g.\n# PROFIT_LOCK_GIVEBACK_PCT = 0.35\n")
     po = "" if allow_pyramiding else "allow_pyramiding = false          # never add size to a winning trade: you hold exactly your starting lots\n"
     ow = "owner = true                       # may pause every bot on this server with /pauseall\n" if owner else ""
     return f"""# Your trading-bot profile. Edit the numbers, save, restart the bot. Secrets go in the .env file, NOT here.
@@ -239,7 +241,6 @@ experience = "{experience}"                # "new" = more cautious lot suggestio
 {po}
 {sz if sz else "# [sizing]                         # planning inputs, normally leave out" + chr(10) + "# margin_per_lot = 90000" + chr(10) + "# loss_per_lot = 4500"}
 
-# [overrides]                      # OWNER ONLY: any setting from config.py, e.g.
-# PROFIT_LOCK_GIVEBACK_PCT = 0.35
+{ov}
 """
 

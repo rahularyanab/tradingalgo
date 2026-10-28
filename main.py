@@ -35,7 +35,7 @@ import math
 import sys
 import time
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -43,11 +43,12 @@ import schedule
 
 import paths as _paths
 import control as _control
+import entry_guard as _entry_guard
 _paths.ensure_dirs()          # per-instance logs/ and data/ (no-op for the default instance)
 
 from auth.kite_login import load_access_token
 from execution.order_manager import (
-    place_sell_order, place_buy_order, place_spread_entry, place_buy_limit_exact, modify_order_price,
+    place_sell_order, place_buy_order, place_spread_entry, place_buy_limit_exact, modify_order_price, square_off_position,
 )
 from config import (
     MARKET_OPEN_HOUR, MARKET_OPEN_MIN,
@@ -344,6 +345,21 @@ def _paused_now() -> bool:
     """True while this bot (or every bot, via the owner) is paused: no new entries, no added size, no re-entry after a reversal.
     Never consulted by anything protective (stops, exits, EOD flatten, fill checks)."""
     return _control.is_paused()[0]
+
+
+def _entry_failed(reason: str) -> None:
+    """One failed entry attempt (refused order, or accepted but the position never appeared). After ENTRY_FAIL_LIMIT of them the
+    day is over for this instance — see entry_guard.py. Off (a no-op) unless the profile sets ENTRY_FAIL_LIMIT."""
+    n, halted = _entry_guard.record_failure(reason)
+    if n == 0:
+        return
+    lim = _entry_guard.limit()
+    why = str(reason).replace("`", "'")[:200]
+    if halted:
+        _post(f"🛑 *Done for the day* — {n} entry attempts failed.\nLast: `{why}`\n"
+              f"No more entries today; nothing is open from these attempts. The bot tries again tomorrow, or send /resume to give it {lim} more tries now.")
+    else:
+        _post(f"⚠️ *Entry attempt {n} of {lim} failed.*\n`{why}`\nIt will try again at the next signal; after {lim} failed attempts it stops for the day.")
 
 
 def _pause_reminder():
@@ -1193,6 +1209,7 @@ def _enter_strangle(kite, signal, qty: int, spot: float, oc, pyramid_disabled: b
 
     errors = [r.error for r in (ce_res, pe_res) if not r.success]
     send_error_alert(f"Strangle entry failed: {'; '.join(errors)}")
+    _entry_failed(f"strangle entry failed: {'; '.join(str(e) for e in errors)}")
     return False
 
 
@@ -1502,6 +1519,10 @@ def _reconcile_open_trade(kite) -> str:
         logger.warning(f"Reconcile: {names} not found at the broker (1st check) — no orders will be placed; re-checking")
         return "FLAT"
 
+    if _entry_guard.limit() > 0 and _entry_never_filled(kite, trade, missing):
+        _fail_fresh_entry(kite, trade, legs, live, names)
+        return "CLOSED"
+
     logger.warning(f"Reconcile: {names} flat at the broker on 2 checks — treating as closed outside the bot")
     for leg in missing:
         _journal_external_close(kite, trade, leg)
@@ -1524,6 +1545,51 @@ def _reconcile_open_trade(kite) -> str:
     )
     _save_state()
     return "CLOSED"
+
+
+FRESH_ENTRY_SECONDS = 15 * 60
+
+
+def _entry_never_filled(kite, trade: TradeState, missing: list) -> bool:
+    """True when a trade entered minutes ago never appeared at the broker AND no completed SELL exists for its short leg(s):
+    the broker rejected it after accepting the request (margin), as opposed to the user closing a filled position by hand."""
+    if (datetime.now() - trade.entry_time).total_seconds() > FRESH_ENTRY_SECONDS:
+        return False
+    try:
+        since = trade.entry_time - timedelta(minutes=5)
+        sold = {o.get("tradingsymbol") for o in kite.orders()
+                if o.get("status") == "COMPLETE" and o.get("transaction_type") == "SELL"
+                and o.get("order_timestamp") and o["order_timestamp"] >= since}
+    except Exception as e:
+        logger.warning(f"Reconcile: could not read the order book to classify the missing position ({e}) — treating it as a manual close")
+        return False
+    return not any(l["symbol"] in sold for l in missing)
+
+
+def _fail_fresh_entry(kite, trade: TradeState, legs: list, live: dict, names: str) -> None:
+    """A fresh entry that the broker never filled: undo whatever half of it DID fill (a hedge, or the other strangle leg),
+    forget the phantom trade, and count the failure. Nothing is journaled as a trade — no trade happened."""
+    global strangle_legs
+    undone = []
+    for l in legs:
+        for sym in (l["symbol"], l.get("hedge_symbol")):
+            q = live.get(sym, 0) if sym else 0
+            if not q:
+                continue
+            try:
+                ltp = (kite.ltp([f"NFO:{sym}"]).get(f"NFO:{sym}") or {}).get("last_price")
+            except Exception:
+                ltp = None
+            r = square_off_position(kite, sym, q, "NFO", "NRML", ltp=ltp)
+            undone.append(f"{'bought back' if q < 0 else 'sold'} {sym} ({'ok' if r.success else 'FAILED: ' + str(r.error)})")
+    monitor.clear_trade()
+    strangle_legs = None
+    _ext_close_strikes.pop(_trade_key(trade), None)
+    _save_state()
+    logger.warning(f"Fresh entry never filled ({names}); cleaned up: {undone or 'nothing was held'}")
+    if undone:
+        _post("🧹 *Cleaned up a half-filled entry:* " + "; ".join(u.replace('_', ' ') for u in undone))
+    _entry_failed(f"the broker accepted the order but {names} never appeared as a position (probably rejected: margin)")
 
 
 def _trade_key(trade: TradeState) -> str:
@@ -2079,6 +2145,7 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
                     _save_state()
                 else:
                     send_error_alert(f"Directional re-entry failed: {sell_res.error}")
+                    _entry_failed(f"re-entry order failed: {sell_res.error}")
                     new_signal = None
 
     # ── Send Telegram alert ───────────────────────────────────────
@@ -2324,6 +2391,7 @@ def run_scan():
                         _save_state()
                     else:
                         send_error_alert(f"Entry order failed: {sell_res.error}")
+                        _entry_failed(f"entry order failed: {sell_res.error}")
 
                 elif final.action == "STRANGLE" and _strangle_entry_allowed():
                     qty = final.strangle_lots * NIFTY_LOT_SIZE

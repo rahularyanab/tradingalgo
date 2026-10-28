@@ -85,8 +85,15 @@ def go_live(client, *, say, verify, record, start, min_funds, start_at, give_up_
     say("✅ Angel verification passed" + (" (test order placed, modified and cancelled)." if test_order and not filled else ".")
         + (f"\n⚠️ The test order FILLED ({filled[0]}). Square that tiny position off in your Angel app." if filled else ""))
 
+    if min_funds <= 0:
+        try:
+            cash = free_cash(client)
+            say(f"💰 Free cash in your account: ₹{cash:,.0f}. No minimum is required — the bot will try; if margin is short, orders get rejected and it stops for the day after the allowed number of failed entries.")
+        except Exception as e:
+            cash = None
+            say(f"⚠️ Could not read your funds ({e}); starting anyway as no minimum is required.")
     last_note = None
-    while True:
+    while min_funds > 0:
         try:
             cash = free_cash(client)
         except Exception as e:
@@ -112,7 +119,7 @@ def go_live(client, *, say, verify, record, start, min_funds, start_at, give_up_
     if not ok:
         say(f"🚫 *Could not start the bot:* {why}")
         return 1
-    say(f"🟢 *Your Angel bot is LIVE* — funds ₹{cash:,.0f} free. It looks for trades from 10:00 AM: 1 lot, no added size, daily loss limit as set. "
+    say(f"🟢 *Your Angel bot is LIVE* — funds {'unknown' if cash is None else f'₹{cash:,.0f}'} free. It looks for trades from 10:00 AM: 1 lot, no added size, daily loss limit as set. "
         f"Send /pause to stop new trades at any time.")
     return 0
 

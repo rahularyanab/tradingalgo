@@ -193,6 +193,7 @@ BROKER       = "zerodha"         # "zerodha" | "angel"
 BROKER_PAPER = False             # Angel only: True = real market data, SIMULATED orders (see broker/angel_paper.py)
 
 # ── Starting-size ceiling for the per-user lot suggestion ─────────────────────
+ENTRY_FAIL_LIMIT = 0             # 0 = off. N > 0: after N failed entry attempts in a day the bot stops entering until tomorrow (set per user in [overrides])
 MAX_START_LOTS = 3               # starting lots are never suggested above this — the size the strategy has been tested at
 
 # ── Per-user profile (optional) ───────────────────────────────────────────────

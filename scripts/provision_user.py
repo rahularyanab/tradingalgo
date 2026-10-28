@@ -55,6 +55,7 @@ def main(argv=None) -> int:
     ap.add_argument("--broker", default="zerodha", choices=["zerodha", "angel"])
     ap.add_argument("--live", action="store_true", help="Angel only: place REAL orders (default is paper mode with simulated orders)")
     ap.add_argument("--loss-per-lot", type=float, default=None, help="what you accept one lot losing in a bad exit (default 4500 new / 3000 experienced); lowering it lets a small capital run 1 lot")
+    ap.add_argument("--max-failed-entries", type=int, default=None, help="after this many failed entry attempts in a day (e.g. margin rejections) stop entering until tomorrow")
     ap.add_argument("--no-pyramiding", action="store_true", help="never add size to a winning trade (hold exactly the starting lots)")
     ap.add_argument("--owner", action="store_true", help="this person may pause EVERY bot on the server with /pauseall")
     ap.add_argument("--max-loss", type=float, default=None, help="daily loss limit; default 1%% of capital")
@@ -77,7 +78,7 @@ def main(argv=None) -> int:
 
     text = userprofile.render_template(
         a.display_name or a.name.title(), a.broker.lower(), a.capital, a.max_loss, a.experience, a.lots, paper=(False if a.live else None),
-        allow_pyramiding=not a.no_pyramiding, owner=a.owner, loss_per_lot=a.loss_per_lot)
+        allow_pyramiding=not a.no_pyramiding, owner=a.owner, loss_per_lot=a.loss_per_lot, max_failed_entries=a.max_failed_entries)
     try:                                              # validate BEFORE creating anything
         import importlib.util
         cfg_ns = {"MAX_START_LOTS": 3}

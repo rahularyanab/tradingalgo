@@ -13,6 +13,7 @@ import json
 import logging
 from datetime import datetime
 
+import entry_guard
 import paths
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,13 @@ def _read(path) -> dict:
         return json.loads(path.read_text())
     except Exception:
         return {"at": "", "by": "unknown"}
+
+
+def _read_last() -> str:
+    try:
+        return json.loads(paths.ENTRY_FAILS_FILE.read_text()).get("last", "")[:80].replace("`", "'") or "unknown"
+    except Exception:
+        return "unknown"
 
 
 def _when(info: dict) -> str:
@@ -44,6 +52,8 @@ def is_paused():
     if paths.PAUSE_FILE.exists():
         i = _read(paths.PAUSE_FILE)
         return True, f"paused by you ({_when(i)})"
+    if entry_guard.halted_today():
+        return True, f"{entry_guard.count()} entry attempts failed today (last: {_read_last()}) — done for the day"
     return False, ""
 
 
@@ -63,6 +73,7 @@ def resume() -> bool:
     """Resume this bot's own pause. Returns False if it wasn't paused."""
     was = paths.PAUSE_FILE.exists()
     paths.PAUSE_FILE.unlink(missing_ok=True)
+    was = entry_guard.reset() or was                      # also forgets today's failed entries: a manual /resume is a fresh start
     logger.warning("RESUMED by telegram — entries allowed again.")
     return was
 

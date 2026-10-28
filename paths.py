@@ -31,6 +31,7 @@ ONBOARD_FLAG = HOME / ".onboarded.json"
 BROKER_OK_FLAG = HOME / ".broker_verified"
 PAUSE_FILE = HOME / ".paused"                       # this instance only   (/pause, /resume)
 GLOBAL_PAUSE_FILE = ROOT / "pause_all.flag"         # EVERY instance on this server, set by the owner (/pauseall, /resumeall)
+ENTRY_FAILS_FILE = HOME / ".entry_fails"             # today's failed entry attempts (entry_guard.py)
 ANGEL_VERIFIED_FILE = HOME / ".angel_verified"      # written by scripts/verify_angel.py when it passes in market hours
 
 

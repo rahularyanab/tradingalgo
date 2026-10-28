@@ -92,6 +92,14 @@ e = Env(WED, [150_000], [GOOD]); rc = e.go(headroom=lambda: G.MIN_HEADROOM_MB)
 check("exactly the required headroom is enough", rc == 0 and e.started == 1)
 check("memory_headroom_mb reads this machine without error (or /proc is absent on macOS)", True if not Path("/proc/meminfo").exists() else G.memory_headroom_mb() > 0)
 
+e = Env(WED, [78_000], [GOOD]); rc = e.go(min_funds=0)
+check("min_funds = 0: starts without waiting for any balance, but still tells you the balance and the rule",
+      rc == 0 and e.started == 1 and any("No minimum is required" in m and "78,000" in m for m in e.msgs) and not any("Waiting for funds" in m for m in e.msgs), str(e.msgs))
+e = Env(WED, [None], [GOOD]); rc = e.go(min_funds=0)
+check("min_funds = 0 and the balance is unreadable: still starts, and says it could not read it", rc == 0 and e.started == 1 and any("Could not read your funds" in m for m in e.msgs) and "unknown" in e.msgs[-1], str(e.msgs))
+e = Env(WED, [78_000], [BAD]); rc = e.go(min_funds=0)
+check("min_funds = 0 never skips the verification", rc == 1 and e.started == 0)
+
 print("\n[3] helpers")
 class C1:
     def rms(self): return {"availablecash": "78307.94", "net": "1"}
