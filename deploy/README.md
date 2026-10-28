@@ -91,5 +91,8 @@ Order of events: provision → fill `.env` → `verify_angel.py` in market hours
 
 Pausing never switches off protection: an open trade keeps its stop-loss, the day-loss floor, signal and profit exits, the 3:25 PM flatten and its fill checks. If you want everything closed right now, close it in the broker app, then `/pause` — the bot notices a manual close within a minute or two and will not trade against it. A paused bot reminds you once a day. The pause survives restarts (it is a file).
 
+## Zerodha login retry (owner's bot)
+`deploy/trading-login.service.retry.conf` is installed on the server as `/etc/systemd/system/trading-login.service.d/retry.conf`: if the 08:45 login fails it is retried up to 3 more times, 4 minutes apart, then gives up (more attempts risk an account lock). After copying it run `systemctl daemon-reload`.
+
 ## Not included yet
 A public website and any public posting of trades.
