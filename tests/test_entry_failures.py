@@ -209,6 +209,16 @@ t0 = userprofile.render_template("Priya", "angel", 500000)
 st0 = userprofile.build(userprofile.parse(t0), {"MAX_START_LOTS": 3, "ENTRY_FAIL_LIMIT": 0}, t0)
 check("without the flag the guide says nothing about it", "entry attempts fail" not in onboarding.params_message(st0))
 
+import importlib.util, io, contextlib                                # noqa: E402
+spec = importlib.util.spec_from_file_location("provision_user", ROOT / "scripts" / "provision_user.py")
+PU = importlib.util.module_from_spec(spec); spec.loader.exec_module(PU)
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    rc = PU.main(["efuser", "--broker", "angel", "--live", "--lots", "1", "--capital", "200000", "--max-loss", "2000", "--loss-per-lot", "2000",
+                  "--max-failed-entries", "2", "--base", str(TMP / "users"), "--no-seed"])
+prof = (TMP / "users" / "efuser" / "profile.toml").read_text() if rc == 0 else ""
+check("provision_user.py --max-failed-entries 2 succeeds and writes [overrides] ENTRY_FAIL_LIMIT = 2", rc == 0 and "ENTRY_FAIL_LIMIT = 2" in prof and "[overrides]" in prof, buf.getvalue()[-300:])
+
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
     print("FAILED:", *FAIL, sep="\n  - ")

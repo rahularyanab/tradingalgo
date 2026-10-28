@@ -81,7 +81,7 @@ def main(argv=None) -> int:
         allow_pyramiding=not a.no_pyramiding, owner=a.owner, loss_per_lot=a.loss_per_lot, max_failed_entries=a.max_failed_entries)
     try:                                              # validate BEFORE creating anything
         import importlib.util
-        cfg_ns = {"MAX_START_LOTS": 3}
+        cfg_ns = {"MAX_START_LOTS": 3, "ENTRY_FAIL_LIMIT": 0}       # the config.py names a profile may set/override
         st = userprofile.build(userprofile.parse(text), cfg_ns, text)
     except ProfileError as e:
         print(f"Cannot create this profile:\n{e}", file=sys.stderr)
