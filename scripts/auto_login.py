@@ -24,12 +24,12 @@ from kiteconnect import KiteConnect
 from dotenv import load_dotenv
 import os
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from paths import TOKEN_FILE, load_instance_env   # per-instance (see paths.py)
+
 load_instance_env()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s")
 logger = logging.getLogger("auto_login")
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from paths import TOKEN_FILE, load_instance_env   # per-instance (see paths.py)
 
 KITE_BASE    = "https://kite.zerodha.com"
 LOGIN_URL    = f"{KITE_BASE}/api/login"

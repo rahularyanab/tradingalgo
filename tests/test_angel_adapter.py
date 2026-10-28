@@ -55,7 +55,6 @@ def raises(exc, fn, *a, **k):
     return None
 
 
-from fakes_angel import *                           # noqa: E402,F401,F403  (the fake server + make_client)
 from fakes_angel import ROWS, BY_SYMBOL, TODAY, EXP1, EXP2, SPOT, angel_exp, sym, opt_price, make_rows, Resp, FakeAngel, make_client  # noqa: E402
 
 # ───────────────────────── tests ─────────────────────────
