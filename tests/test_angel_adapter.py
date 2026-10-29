@@ -21,6 +21,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+os.environ["TELEGRAM_BOT_TOKEN"] = os.environ["TELEGRAM_CHAT_ID"] = ""     # tests must never post to the live Telegram bot (the local .env holds its token)
 os.environ.pop("ALGO_USER_DIR", None)
 
 import requests                                       # noqa: E402
