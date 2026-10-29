@@ -34,6 +34,11 @@ from broker.angel_paper import PaperLedger
 
 logger = logging.getLogger(__name__)
 
+# Angel's candle endpoint refuses ~40% of scans' first request ("exceeding access rate") even though we send 1 call per 15 min.
+# Retry it for ~30 s (waits of 3+6+9+12 s) instead of ~3 s. Other routes keep the short retry.
+CANDLE_RETRIES = 5
+CANDLE_RATE_WAIT = 3.0
+
 ROOT_URL = "https://apiconnect.angelone.in"
 ROUTES = {
     "login":    "/rest/auth/angelbroking/user/v1/loginByPassword",
@@ -165,7 +170,7 @@ class AngelClient:
                 self._sleep(wait)
         self._last_call = self._clock()
 
-    def _call(self, route: str, payload=None, method="POST", retries=3, auth=True) -> dict:
+    def _call(self, route: str, payload=None, method="POST", retries=3, auth=True, rate_wait=1.0) -> dict:
         url = ROOT_URL + ROUTES[route]
         last = None
         for attempt in range(retries):
@@ -183,7 +188,9 @@ class AngelClient:
             if r.status_code == 429 or "exceeding access rate" in text.lower():
                 last = AngelError(f"Angel rate limit hit on {route}", "RATE")
                 self.stats["retries"] += 1
-                self._sleep(1.0 * (attempt + 1))
+                logger.warning(f"Angel refused {route} (attempt {attempt + 1}/{retries}, HTTP {r.status_code}): {text[:150]!r}")
+                if attempt + 1 < retries:
+                    self._sleep(rate_wait * (attempt + 1))
                 continue
             if r.status_code == 401:
                 raise AngelSessionError("Angel rejected the login token (HTTP 401) — log in again.", "401")
@@ -310,7 +317,8 @@ class AngelClient:
         if interval not in INTERVALS:
             raise AngelError(f"Unsupported candle interval {interval!r}.")
         body = self._call("candles", {"exchange": exch, "symboltoken": token, "interval": INTERVALS[interval],
-                                      "fromdate": fmt(from_date), "todate": fmt(to_date)})
+                                      "fromdate": fmt(from_date), "todate": fmt(to_date)},
+                          retries=CANDLE_RETRIES, rate_wait=CANDLE_RATE_WAIT)
         out = []
         for row in body.get("data") or []:
             ts = row[0]

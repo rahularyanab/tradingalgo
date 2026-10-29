@@ -120,6 +120,18 @@ check("rate limiting is retried and succeeds", c.profile()["clientcode"] == "A12
 c, fake, _ = make_client(); fake.rate_limit_n = 5
 e = raises(AngelError, c.profile)
 check("persistent rate limiting gives up with a clear error", e is not None and "rate limit" in str(e).lower())
+slept = []
+c, fake, _ = make_client(); fake.rate_limit_n = 4; c._sleep = slept.append; c.min_interval = 0
+rows = c.historical_data(256265, "2026-10-28 09:15", "2026-10-29 09:15", "15minute")
+check("candles survive 4 refusals in a row (5 tries) and the waits are 3+6+9+12 s", len(rows) == 25 and [x for x in slept if x >= 1] == [3.0, 6.0, 9.0, 12.0], str(slept))
+slept = []
+c, fake, _ = make_client(); fake.rate_limit_n = 9; c._sleep = slept.append; c.min_interval = 0
+e = raises(AngelError, c.historical_data, 256265, "2026-10-28 09:15", "2026-10-29 09:15", "15minute")
+check("candles give up after 5 tries with the clear error, no sleep after the last", e is not None and "rate limit" in str(e).lower() and c.stats["calls"] == 5 and [x for x in slept if x >= 1] == [3.0, 6.0, 9.0, 12.0], str(slept))
+slept = []
+c, fake, _ = make_client(); fake.rate_limit_n = 9; c._sleep = slept.append; c.min_interval = 0
+raises(AngelError, c.profile)
+check("other routes keep the short 3-try retry", c.stats["calls"] == 3 and [x for x in slept if x >= 1] == [1.0, 2.0], str(slept))
 c, fake, _ = make_client(); fake.net_error_n = 2
 check("transient network errors are retried", c.profile()["name"] == "Test")
 slept = []
