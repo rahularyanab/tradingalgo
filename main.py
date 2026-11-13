@@ -32,6 +32,7 @@ import csv
 import json
 import logging
 import math
+import re
 import sys
 import time
 from dataclasses import replace
@@ -360,6 +361,50 @@ def _entry_failed(reason: str) -> None:
               f"No more entries today; nothing is open from these attempts. The bot tries again tomorrow, or send /resume to give it {lim} more tries now.")
     else:
         _post(f"⚠️ *Entry attempt {n} of {lim} failed.*\n`{why}`\nIt will try again at the next signal; after {lim} failed attempts it stops for the day.")
+
+
+_MARGIN_ERROR = re.compile(r"insufficient (funds|margin)|margin (required|shortfall|exceed)|not enough margin", re.I)
+
+
+def _is_margin_error(err) -> bool:
+    return bool(_MARGIN_ERROR.search(str(err or "")))
+
+
+def _enter_with_stepdown(qty: int, attempt, what: str):
+    """
+    Place an entry of `qty` shares; when the broker refuses it for margin, retry AT ONCE with one lot fewer, down to 1 lot
+    (3 -> 2 -> 1). attempt(q) -> (ok, error, clean); `clean` = a failed attempt left nothing open. An orphan hedge or leg
+    means stop: a retry would stack another position on top of it. Any refusal that is not about margin also stops.
+    Returns (ok, shares_entered, last_error).
+    """
+    q = qty
+    while True:
+        ok, err, clean = attempt(q)
+        if ok:
+            if q != qty:
+                logger.warning(f"{what}: entered {q // NIFTY_LOT_SIZE} of {qty // NIFTY_LOT_SIZE} lot(s) after margin refusals")
+                _post(f"⚠️ *Margin short* — {what}: entered *{q // NIFTY_LOT_SIZE} of {qty // NIFTY_LOT_SIZE} lot(s)*.\nNo added size on this trade.")
+            return True, q, None
+        if q <= NIFTY_LOT_SIZE or not clean or not _is_margin_error(err):
+            if q != qty:
+                logger.error(f"{what}: still refused at {q // NIFTY_LOT_SIZE} lot(s) after stepping down from {qty // NIFTY_LOT_SIZE}: {err}")
+            return False, q, err
+        logger.warning(f"{what}: margin refused {q // NIFTY_LOT_SIZE} lot(s) — retrying at once with {q // NIFTY_LOT_SIZE - 1}: {err}")
+        q -= NIFTY_LOT_SIZE
+
+
+def _spread_attempt(kite, symbol, premium, hedge_sym, hedge_ltp):
+    """attempt(q) for _enter_with_stepdown: the hedged spread when there is a hedge, a plain sell otherwise."""
+    def attempt(q):
+        if hedge_sym:
+            h_res, s_res = place_spread_entry(kite, symbol, hedge_sym, q, sell_price=premium, hedge_price=hedge_ltp)
+        else:
+            h_res, s_res = None, place_sell_order(kite, symbol, q, price=premium)
+        if s_res.success:
+            return True, None, True
+        err = h_res.error if (h_res is not None and not h_res.success) else s_res.error
+        return False, err, "HEDGE UNWIND FAILED" not in str(s_res.error)
+    return attempt
 
 
 def _pause_reminder():
@@ -1159,26 +1204,50 @@ def _enter_strangle(kite, signal, qty: int, spot: float, oc, pyramid_disabled: b
     when the signal found one (falls back to a naked sell for that side
     otherwise, same as the directional entry path). If one side enters but
     the other fails, unwinds whichever side succeeded rather than leaving a
-    naked single-sided position no one asked for.
+    naked single-sided position no one asked for. A margin refusal is retried
+    at once with one lot fewer (see _enter_with_stepdown), but only when the
+    failed attempt was fully unwound.
     Returns True and sets monitor.trade/strangle_legs on success.
     """
-    if signal.hedge_call_symbol:
-        hedge_ce_res, ce_res = place_spread_entry(
-            kite, signal.call_symbol, signal.hedge_call_symbol, qty,
-            sell_price=signal.call_premium, hedge_price=signal.hedge_call_ltp,
-        )
-    else:
-        hedge_ce_res, ce_res = None, place_sell_order(kite, signal.call_symbol, qty, price=signal.call_premium)
+    def attempt(q):
+        if signal.hedge_call_symbol:
+            hedge_ce_res, ce_res = place_spread_entry(
+                kite, signal.call_symbol, signal.hedge_call_symbol, q,
+                sell_price=signal.call_premium, hedge_price=signal.hedge_call_ltp,
+            )
+        else:
+            hedge_ce_res, ce_res = None, place_sell_order(kite, signal.call_symbol, q, price=signal.call_premium)
 
-    if signal.hedge_put_symbol:
-        hedge_pe_res, pe_res = place_spread_entry(
-            kite, signal.put_symbol, signal.hedge_put_symbol, qty,
-            sell_price=signal.put_premium, hedge_price=signal.hedge_put_ltp,
-        )
-    else:
-        hedge_pe_res, pe_res = None, place_sell_order(kite, signal.put_symbol, qty, price=signal.put_premium)
+        if signal.hedge_put_symbol:
+            hedge_pe_res, pe_res = place_spread_entry(
+                kite, signal.put_symbol, signal.hedge_put_symbol, q,
+                sell_price=signal.put_premium, hedge_price=signal.hedge_put_ltp,
+            )
+        else:
+            hedge_pe_res, pe_res = None, place_sell_order(kite, signal.put_symbol, q, price=signal.put_premium)
 
-    if ce_res.success and pe_res.success:
+        if ce_res.success and pe_res.success:
+            return True, None, True
+
+        # One side succeeded, the other failed — unwind the successful side
+        # rather than leaving a naked single-sided position.
+        clean = True
+        if ce_res.success:
+            clean &= place_buy_order(kite, signal.call_symbol, q, price=signal.call_premium).success
+            if hedge_ce_res and hedge_ce_res.success:
+                clean &= place_sell_order(kite, signal.hedge_call_symbol, q, price=signal.hedge_call_ltp).success
+        if pe_res.success:
+            clean &= place_buy_order(kite, signal.put_symbol, q, price=signal.put_premium).success
+            if hedge_pe_res and hedge_pe_res.success:
+                clean &= place_sell_order(kite, signal.hedge_put_symbol, q, price=signal.hedge_put_ltp).success
+
+        errors = [(h.error if (h is not None and not h.success) else r.error)
+                  for h, r in ((hedge_ce_res, ce_res), (hedge_pe_res, pe_res)) if not r.success]
+        clean = clean and not any("HEDGE UNWIND FAILED" in str(e) for e in errors)
+        return False, "; ".join(str(e) for e in errors), clean
+
+    ok, entered, err = _enter_with_stepdown(qty, attempt, "STRANGLE")
+    if ok:
         monitor.set_trade(TradeState(
             action="STRANGLE",
             strike=signal.call_strike,
@@ -1189,27 +1258,15 @@ def _enter_strangle(kite, signal, qty: int, spot: float, oc, pyramid_disabled: b
             sl_spot_level=signal.call_sl or spot,
             sl_put=signal.put_sl,
             expiry=signal.expiry,
-            lots=qty,
-            pyramid_disabled=pyramid_disabled,
+            lots=entered,
+            pyramid_disabled=pyramid_disabled or entered != qty,
         ))
         _register_strangle(signal, spot, oc)
         _save_state()
         return True
 
-    # One side succeeded, the other failed — unwind the successful side
-    # rather than leaving a naked single-sided position.
-    if ce_res.success:
-        place_buy_order(kite, signal.call_symbol, qty, price=signal.call_premium)
-        if hedge_ce_res and hedge_ce_res.success:
-            place_sell_order(kite, signal.hedge_call_symbol, qty, price=signal.hedge_call_ltp)
-    if pe_res.success:
-        place_buy_order(kite, signal.put_symbol, qty, price=signal.put_premium)
-        if hedge_pe_res and hedge_pe_res.success:
-            place_sell_order(kite, signal.hedge_put_symbol, qty, price=signal.hedge_put_ltp)
-
-    errors = [r.error for r in (ce_res, pe_res) if not r.success]
-    send_error_alert(f"Strangle entry failed: {'; '.join(errors)}")
-    _entry_failed(f"strangle entry failed: {'; '.join(str(e) for e in errors)}")
+    send_error_alert(f"Strangle entry failed: {err}")
+    _entry_failed(f"strangle entry failed: {err}")
     return False
 
 
@@ -2122,12 +2179,11 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
                 hedge_sym    = new_signal.hedge_call_symbol if is_call else new_signal.hedge_put_symbol
                 hedge_ltp    = new_signal.hedge_call_ltp    if is_call else new_signal.hedge_put_ltp
                 hedge_strike = new_signal.hedge_call_strike if is_call else new_signal.hedge_put_strike
-                if hedge_sym:
-                    _, sell_res = place_spread_entry(kite, new_signal.symbol, hedge_sym, new_qty,
-                                                     sell_price=new_signal.premium, hedge_price=hedge_ltp)
-                else:
-                    sell_res = place_sell_order(kite, new_signal.symbol, new_qty, price=new_signal.premium)
-                if sell_res.success:
+                want_qty = new_qty
+                entered, new_qty, entry_err = _enter_with_stepdown(
+                    want_qty, _spread_attempt(kite, new_signal.symbol, new_signal.premium, hedge_sym, hedge_ltp),
+                    f"{new_signal.action.replace('_', ' ')} {new_signal.strike}")
+                if entered:
                     monitor.set_trade(TradeState(
                         action=new_signal.action,
                         strike=new_signal.strike,
@@ -2141,11 +2197,12 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
                         hedge_symbol=hedge_sym,
                         hedge_strike=hedge_strike,
                         hedge_entry_premium=hedge_ltp,
+                        pyramid_disabled=new_qty != want_qty,
                     ))
                     _save_state()
                 else:
-                    send_error_alert(f"Directional re-entry failed: {sell_res.error}")
-                    _entry_failed(f"re-entry order failed: {sell_res.error}")
+                    send_error_alert(f"Directional re-entry failed: {entry_err}")
+                    _entry_failed(f"re-entry order failed: {entry_err}")
                     new_signal = None
 
     # ── Send Telegram alert ───────────────────────────────────────
@@ -2359,13 +2416,11 @@ def run_scan():
                     hedge_sym    = final.hedge_call_symbol if is_call else final.hedge_put_symbol
                     hedge_ltp    = final.hedge_call_ltp    if is_call else final.hedge_put_ltp
                     hedge_strike = final.hedge_call_strike if is_call else final.hedge_put_strike
-                    qty          = final.lots * NIFTY_LOT_SIZE
-                    if hedge_sym:
-                        _, sell_res = place_spread_entry(kite, final.symbol, hedge_sym, qty,
-                                                         sell_price=final.premium, hedge_price=hedge_ltp)
-                    else:
-                        sell_res = place_sell_order(kite, final.symbol, qty, price=final.premium)
-                    if sell_res.success:
+                    want         = final.lots * NIFTY_LOT_SIZE
+                    entered, qty, entry_err = _enter_with_stepdown(
+                        want, _spread_attempt(kite, final.symbol, final.premium, hedge_sym, hedge_ltp),
+                        f"{final.action.replace('_', ' ')} {final.strike}")
+                    if entered:
                         monitor.set_trade(TradeState(
                             action=final.action,
                             strike=final.strike,
@@ -2379,7 +2434,7 @@ def run_scan():
                             hedge_symbol=hedge_sym,
                             hedge_strike=hedge_strike,
                             hedge_entry_premium=hedge_ltp,
-                            pyramid_disabled=pyramid_disabled_flag,
+                            pyramid_disabled=pyramid_disabled_flag or qty != want,
                         ))
                         if is_reentry:
                             _reentry_count[final.action] = _reentry_count.get(final.action, 0) + 1
@@ -2390,8 +2445,8 @@ def run_scan():
                         _signal_exit_cooldown = 0
                         _save_state()
                     else:
-                        send_error_alert(f"Entry order failed: {sell_res.error}")
-                        _entry_failed(f"entry order failed: {sell_res.error}")
+                        send_error_alert(f"Entry order failed: {entry_err}")
+                        _entry_failed(f"entry order failed: {entry_err}")
 
                 elif final.action == "STRANGLE" and _strangle_entry_allowed():
                     qty = final.strangle_lots * NIFTY_LOT_SIZE
