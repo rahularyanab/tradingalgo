@@ -49,7 +49,11 @@ for msg in (MARGIN_MSG, "RMS:Margin Exceeds, Required:1,23,000", "Insufficient m
 for msg in ("Order rejected: price out of range", "Hedge buy failed", "network error calling placeOrder", "", None, "Invalid token"):
     check(f"NOT a margin error: {msg!r}", not main._is_margin_error(msg))
 
-print("\n[2] _enter_with_stepdown on its own")
+OWNER_STEP = (config.MARGIN_STEP_LOTS, config.MARGIN_FLOOR_LOTS)
+check("the owner's shipped defaults are step 2, floor 2 (6 -> 4 -> 2) and the bot reads them", OWNER_STEP == (2, 2) and (main.MARGIN_STEP_LOTS, main.MARGIN_FLOOR_LOTS) == (2, 2))
+main.MARGIN_STEP_LOTS = main.MARGIN_FLOOR_LOTS = 1       # sections [2]-[4] test the PROFILE-instance rule: one lot at a time, down to 1 (section [5]: the owner's)
+
+print("\n[2] _enter_with_stepdown on its own (profile rule: step 1, floor 1)")
 posts = []
 main._post = lambda t: posts.append(t) or True
 
@@ -189,6 +193,52 @@ b = Broker({CE: 0, PE: 0}); run(strangle, b)
 check("strangle, nothing fits: ends flat (no leg left open), one failed entry, one alert", main.monitor.trade is None and b.net(CE) == 0 and b.net(PE) == 0 and entry_guard.count() == 1 and len(alerts) == 1, str((b.log, alerts)))
 b = Broker({CE: 5, PE: 5}); run(strangle, b)
 check("strangle, enough margin: unchanged — 3 lots, one attempt per leg", main.monitor.trade.lots == 3 * LOT and not main.monitor.trade.pyramid_disabled and len([1 for s, side, n in b.log if side == "SELL"]) == 2)
+
+print("\n[5] the owner's rule: 6 -> 4 -> 2 (step 2, floor 2)")
+main.MARGIN_STEP_LOTS, main.MARGIN_FLOOR_LOTS = OWNER_STEP
+for cap, want in ((6, [6]), (4, [6, 4]), (3, [6, 4, 2]), (2, [6, 4, 2])):
+    att, tried = stepper(cap); posts.clear()
+    ok, q, err = main._enter_with_stepdown(6 * LOT, att, "X")
+    check(f"6 lots, {cap} fit: tries {want}, enters {want[-1]}", ok and q == want[-1] * LOT and tried == want, str(tried))
+for cap in (1, 0):
+    att, tried = stepper(cap); posts.clear()
+    ok, q, err = main._enter_with_stepdown(6 * LOT, att, "X")
+    check(f"6 lots, only {cap} fits: tries 6, 4, 2 and then STOPS — no 1-lot try, no trade", not ok and tried == [6, 4, 2] and "Insufficient funds" in err and not posts, str(tried))
+att, tried = stepper(0)
+check("a 2-lot (or 1-lot) signal is attempted once — nothing below the floor", main._enter_with_stepdown(2 * LOT, att, "X")[0] is False and tried == [2])
+att, tried = stepper(0)
+check("a 1-lot signal (protected mode) is attempted once", main._enter_with_stepdown(LOT, att, "X")[0] is False and tried == [1])
+att, tried = stepper(2)
+check("a 3-lot signal (e.g. a late entry) tries 3 then 2, never 1", main._enter_with_stepdown(3 * LOT, att, "X")[:2] == (True, 2 * LOT) and tried == [3, 2], str(tried))
+att, tried = stepper(0)
+check("5 lots: 5 -> 3 -> 2", main._enter_with_stepdown(5 * LOT, att, "X")[0] is False and tried == [5, 3, 2], str(tried))
+att, tried = stepper(0, err="Order rejected: price out of range")
+check("a non-margin refusal is still not retried", main._enter_with_stepdown(6 * LOT, att, "X")[0] is False and tried == [6])
+att, tried = stepper(0, clean=False)
+check("a refusal that left something open is still not retried", main._enter_with_stepdown(6 * LOT, att, "X")[0] is False and tried == [6])
+
+config.ENTRY_FAIL_LIMIT = 2
+for hedged in (False, True):
+    tag = "hedged" if hedged else "naked"
+    b = Broker({CE: 4}); run(directional(6, hedged), b)
+    check(f"[{tag}] 6 refused, 4 fit: SELL attempts [6, 4] -> a 4-lot trade, no pyramiding, one note",
+          [n for s, side, n in b.log if s == CE and side == "SELL"] == [6, 4] and main.monitor.trade.lots == 4 * LOT and main.monitor.trade.pyramid_disabled
+          and b.net(CE) == 4 and entry_guard.count() == 0 and sum("4 of 6 lot(s)" in m for m in posts) == 1 and (not hedged or -b.net(HCE) == 4), str(b.log))
+    b = Broker({CE: 2}); run(directional(6, hedged), b)
+    check(f"[{tag}] only 2 fit: attempts 6, 4, 2 -> a 2-lot trade, flat hedge book", [n for s, side, n in b.log if s == CE and side == "SELL"] == [6, 4, 2]
+          and main.monitor.trade.lots == 2 * LOT and b.net(CE) == 2 and (not hedged or -b.net(HCE) == 2), str(b.log))
+    b = Broker({CE: 1}); run(directional(6, hedged), b)
+    check(f"[{tag}] only 1 fits: attempts 6, 4, 2 then NO trade (floor is 2), nothing open, ONE failed entry, one alert",
+          [n for s, side, n in b.log if s == CE and side == "SELL"] == [6, 4, 2] and main.monitor.trade is None and b.net(CE) == 0 and (not hedged or b.net(HCE) == 0)
+          and entry_guard.count() == 1 and len(alerts) == 1, str((b.log, alerts)))
+    b = Broker({CE: 9}); run(directional(6, hedged), b)
+    check(f"[{tag}] enough margin: one attempt at 6 lots, pyramiding unchanged", [n for s, side, n in b.log if s == CE and side == "SELL"] == [6] and main.monitor.trade.lots == 6 * LOT and not main.monitor.trade.pyramid_disabled and not posts)
+strangle4 = FinalSignal(**{**strangle.__dict__, "strangle_lots": 4})
+b = Broker({CE: 4, PE: 2}); run(strangle4, b)
+check("strangle 4 lots/leg: CE fits 4 but PE only 2 -> CE unwound, retried at 2 lots on both legs", main.monitor.trade is not None and main.monitor.trade.lots == 2 * LOT and b.net(CE) == 2 and b.net(PE) == 2, str(b.log))
+b = Broker({CE: 0, PE: 0}); run(strangle4, b)
+check("strangle, nothing fits: 4 then 2, ends flat, one failed entry", main.monitor.trade is None and b.net(CE) == 0 and b.net(PE) == 0 and entry_guard.count() == 1
+      and sorted({n for s, side, n in b.log if side == "SELL"}) == [2, 4], str(b.log))
 
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 sys.exit(1 if FAIL else 0)

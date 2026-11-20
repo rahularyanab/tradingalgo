@@ -155,6 +155,7 @@ def build(data: dict, config_ns: dict, raw_text: str = "") -> Settings:
         "PROTECTED_MAX_LOTS": s.protected_max_lots,
         "PYRAMID_STEP_LOTS": s.step_lots,
         "PROFIT_BOOK_STEP_LOTS": s.step_lots,
+        "MARGIN_STEP_LOTS": 1, "MARGIN_FLOOR_LOTS": 1,         # a profile instance steps down one lot at a time, to 1 lot
         **s.thresholds,
     }
     broker = str(data["broker"]["name"]).strip().lower()

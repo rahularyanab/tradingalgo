@@ -96,17 +96,22 @@ STRANGLE_SL_BUFFER     = 50       # same as directional (80 pts made losses bigg
 # ── Lot sizing ────────────────────────────────────────────────────
 # These are STARTING sizes only. Positions can pyramid up to MAX_LOTS_*
 # below while in profit — see the Pyramiding section.
-LOTS_STRONG        = 3            # directional STRONG signal (3/3)
-LOTS_MODERATE      = 2            # directional MODERATE signal (2/3)
-LOTS_STRANGLE      = 2            # each leg of a strangle (non-directional)
+LOTS_STRONG        = 6            # directional STRONG signal (3/3)   — doubled from 3 on 2026-11-21
+LOTS_MODERATE      = 4            # directional MODERATE signal (2/3) — doubled from 2
+LOTS_STRANGLE      = 4            # each leg of a strangle (non-directional) — doubled from 2
+
+# A new entry the broker refuses for margin is retried at once with fewer lots: LOTS_STRONG 6 -> 4 -> 2 (step 2, never below the floor).
+# Per-user profile instances override both to 1 (userprofile.py), i.e. one lot at a time down to 1, as before.
+MARGIN_STEP_LOTS   = 2            # lots removed per retry
+MARGIN_FLOOR_LOTS  = 2            # the smallest size it will still try; refused at this size = no trade
 
 # ── Pyramiding (scale into strength, never into weakness) ─────────
 # Never applied on entry — only added on top of an already-profitable
 # position, so the risk on fresh capital never changes from today's sizing.
-MAX_LOTS_DIRECTIONAL    = 6       # pyramid ceiling for CALL_SELL/PUT_SELL — same cap for STRONG and MODERATE starts
-MAX_LOTS_STRANGLE_LEG   = 4       # pyramid ceiling per leg for STRANGLE
+MAX_LOTS_DIRECTIONAL    = 12      # pyramid ceiling for CALL_SELL/PUT_SELL — same cap for STRONG and MODERATE starts (doubled from 6)
+MAX_LOTS_STRANGLE_LEG   = 8       # pyramid ceiling per leg for STRANGLE (doubled from 4)
 PYRAMID_CONFIRM_CANDLES = 2       # consecutive in-profit + same-direction MODERATE+ candles before adding lots
-PYRAMID_STEP_LOTS       = 2       # lots added per pyramid step (last step trimmed to not overshoot the cap)
+PYRAMID_STEP_LOTS       = 4       # lots added per pyramid step (last step trimmed to not overshoot the cap) (doubled from 2)
 
 # ── Scheduler ─────────────────────────────────────────────────────
 MARKET_OPEN_HOUR   = 9
@@ -122,9 +127,9 @@ MAX_ROLLS_PER_DAY        = 2
 BREAKOUT_CONFIRM_CANDLES = 2     # consecutive scans above resistance to confirm breakout
 REVERSAL_CONFIRM_CANDLES = 2     # consecutive reversal candles before adding hedge
 CLEAN_CONFIRM_CANDLES    = 2     # consecutive clean candles before removing hedge
-DAILY_MAX_LOSS           = 5000  # ₹ daily hard stop (realised + unrealised) — force-closes the open
+DAILY_MAX_LOSS           = 10000 # ₹ daily hard stop (realised + unrealised) — force-closes the open
                                   # position the instant it's breached, in addition to blocking new entries
-PROFIT_LOCK_ARM_PNL      = 1500  # ₹ unrealised (at entry lot size) to arm the trailing lock
+PROFIT_LOCK_ARM_PNL      = 3000  # ₹ unrealised (at entry lot size) to arm the trailing lock
 PROFIT_LOCK_GIVEBACK_PCT = 0.35  # exit if unrealised retraces this fraction from its peak once armed
 
 # ── Day-profit protection ──────────────────────────────────────────
@@ -134,9 +139,9 @@ PROFIT_LOCK_GIVEBACK_PCT = 0.35  # exit if unrealised retraces this fraction fro
 # i.e. the stop-loss on everything after that is simply the profit already
 # banked. Below the arm level nothing changes (normal sizing, normal
 # DAILY_MAX_LOSS). Latches for the rest of the day once armed.
-DAY_PROFIT_ARM_PNL  = 2500       # ₹ realised today that arms protected mode
+DAY_PROFIT_ARM_PNL  = 5000       # ₹ realised today that arms protected mode
 DAY_PROFIT_FLOOR    = 0          # ₹ protected mode: day P&L may not fall below this (0 = stay green)
-PROTECTED_MAX_LOTS  = 2          # protected mode: cap on lots for any NEW trade (reduced to 1 if 2 won't fit
+PROTECTED_MAX_LOTS  = 4          # protected mode: cap on lots for any NEW trade (reduced down to 1 until it fits
                                   # under the floor — see _protected_lots in main.py)
 PROTECTED_DELTA_EST = 0.6        # rough option delta used to estimate the loss per lot at the SL
 
@@ -165,9 +170,9 @@ GUARD_INTERVAL_SECONDS = 60
 # Replaces the old single-shot "cut to 1 lot at ₹5000" partial lock with
 # staged booking; the trailing lock above still protects whatever's left
 # running between/after these steps.
-PROFIT_BOOK_STEP1_PNL = 5000     # ₹ unrealised → book PROFIT_BOOK_STEP_LOTS lots
-PROFIT_BOOK_STEP2_PNL = 7500     # ₹ unrealised → book another PROFIT_BOOK_STEP_LOTS lots (remainder runs to EOD)
-PROFIT_BOOK_STEP_LOTS = 2        # lots booked at each ladder step
+PROFIT_BOOK_STEP1_PNL = 10000    # ₹ unrealised → book PROFIT_BOOK_STEP_LOTS lots
+PROFIT_BOOK_STEP2_PNL = 15000    # ₹ unrealised → book another PROFIT_BOOK_STEP_LOTS lots (remainder runs to EOD)
+PROFIT_BOOK_STEP_LOTS = 4        # lots booked at each ladder step (always leaves at least 1 running)
 
 # ── Same-direction re-entry after a SIGNAL_EXIT ───────────────────
 # A signal exit blocks re-entry in that direction briefly, then allows it back

@@ -88,8 +88,16 @@ same = {
     "PROTECTED_MAX_LOTS": z3.protected_max_lots, "PYRAMID_STEP_LOTS": z3.step_lots, "PROFIT_BOOK_STEP_LOTS": z3.step_lots,
     **z3.thresholds,
 }
-diff = {k: (v, getattr(config, k)) for k, v in same.items() if getattr(config, k) != v}
-check("at 3 lots every derived setting equals what the owner's bot already uses", not diff, str(diff))
+BASE3 = {"LOTS_STRONG": 3, "LOTS_MODERATE": 2, "LOTS_STRANGLE": 2, "MAX_LOTS_DIRECTIONAL": 6, "MAX_LOTS_STRANGLE_LEG": 4, "PROTECTED_MAX_LOTS": 2,
+         "PYRAMID_STEP_LOTS": 2, "PROFIT_BOOK_STEP_LOTS": 2, "PROFIT_LOCK_ARM_PNL": 1500, "PROFIT_BOOK_STEP1_PNL": 5000, "PROFIT_BOOK_STEP2_PNL": 7500,
+         "DAY_PROFIT_ARM_PNL": 2500}                     # what the bot used until 2026-11-21 — the size every rupee threshold is tuned at
+diff = {k: (v, BASE3[k]) for k, v in same.items() if BASE3[k] != v}
+check("at 3 lots every derived setting equals the original 3-lot bot (the baseline the thresholds are tuned at)", not diff and set(same) == set(BASE3), str(diff))
+diff = {k: (getattr(config, k), 2 * v) for k, v in BASE3.items() if getattr(config, k) != 2 * v}
+check("the owner's own bot (config.py) is exactly 2x that baseline: lots, ceilings, steps and every rupee threshold", not diff, str(diff))
+check("...and its daily loss limit is 2x the old 5000", config.DAILY_MAX_LOSS == 10000)
+check("profile instances keep the one-lot-at-a-time margin step-down", userprofile.build(userprofile.parse('[broker]\nname = "zerodha"\n[capital]\ntotal = 1300000\n'), {"MAX_START_LOTS": 3}).config_values["MARGIN_STEP_LOTS"] == 1
+      and userprofile.build(userprofile.parse('[broker]\nname = "zerodha"\n[capital]\ntotal = 1300000\n'), {"MAX_START_LOTS": 3}).config_values["MARGIN_FLOOR_LOTS"] == 1)
 z1 = sizing.compute(5 * L)
 check("at 1 lot: strong 1 / moderate 1 / strangle 1 / ceiling 2 / step 1", (z1.lots_strong, z1.lots_moderate, z1.lots_strangle, z1.max_lots_directional, z1.step_lots) == (1, 1, 1, 2, 1))
 check("rupee thresholds scale with size (1 lot ≈ a third of the 3-lot values)", z1.thresholds["PROFIT_BOOK_STEP1_PNL"] == 1700 and z1.thresholds["PROFIT_LOCK_ARM_PNL"] == 500, str(z1.thresholds))
@@ -164,7 +172,7 @@ import config as _c
 check("with no ALGO_USER_DIR the paths are exactly the owner's existing layout",
       p and p["state"] == str(ROOT / "logs" / "algo_trade_state.json") and p["journal"] == str(ROOT / "logs" / "trade_journal.csv")
       and p["sr"] == str(ROOT / "data" / "sr_levels.json") and p["token"] == str(ROOT / ".access_token") and p["log"] == str(ROOT / "logs" / "bot.log"), str(p))
-check("...and the owner's limits are untouched (5000 / 3 lots, no profile)", p and p["limit"] == 5000 and p["strong"] == 3 and p["name"] is None, str(p))
+check("...and the owner's limits are config.py's own (10000 / 6 lots since 2026-11-21, no profile)", p and p["limit"] == 10000 and p["strong"] == 6 and p["name"] is None, str({k: v for k, v in (p or {}).items() if k in ("limit", "strong", "name")}))
 
 print("\n[9] secrets check")
 check("everything present → nothing missing", userprofile.missing_secrets("zerodha", {k: "x" for k in userprofile.ALWAYS_REQUIRED_SECRETS + userprofile.REQUIRED_SECRETS["zerodha"]}) == [])

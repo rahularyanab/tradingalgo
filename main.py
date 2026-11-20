@@ -16,7 +16,7 @@ Trade management (every 15-min candle):
 
 Positions can pyramid up (in profit only, never on fresh capital) toward
 MAX_LOTS_DIRECTIONAL / MAX_LOTS_STRANGLE_LEG, and book profit in two steps
-along the way (₹5000 → 2 lots, ₹7500 → 2 more). A daily-loss hard stop at
+along the way (PROFIT_BOOK_STEP1_PNL / STEP2_PNL, PROFIT_BOOK_STEP_LOTS lots each). A daily-loss hard stop at
 -₹DAILY_MAX_LOSS force-closes the open position, not just new entries.
 
 Everything — directionals and strangles — is flattened in one shot at
@@ -63,7 +63,7 @@ from config import (
     FRIDAY_STRANGLE_CUTOFF, STRANGLE_SL_BUFFER,
     NIFTY_LOT_SIZE,
     DAILY_MAX_LOSS, REENTRY_COOLDOWN_CANDLES, MAX_SAME_DIR_REENTRIES,
-    MAX_LOTS_DIRECTIONAL, MAX_LOTS_STRANGLE_LEG, LOW_PREMIUM_THRESHOLD,
+    MAX_LOTS_DIRECTIONAL, MAX_LOTS_STRANGLE_LEG, LOW_PREMIUM_THRESHOLD, MARGIN_STEP_LOTS, MARGIN_FLOOR_LOTS,
     DAY_PROFIT_ARM_PNL, DAY_PROFIT_FLOOR, PROTECTED_MAX_LOTS, PROTECTED_DELTA_EST,
     GUARD_INTERVAL_SECONDS, SETTINGS,
     LATE_ENTRY_HOUR, LATE_ENTRY_MIN, LATE_ENTRY_SIZE_FACTOR,
@@ -372,12 +372,13 @@ def _is_margin_error(err) -> bool:
 
 def _enter_with_stepdown(qty: int, attempt, what: str):
     """
-    Place an entry of `qty` shares; when the broker refuses it for margin, retry AT ONCE with one lot fewer, down to 1 lot
-    (3 -> 2 -> 1). attempt(q) -> (ok, error, clean); `clean` = a failed attempt left nothing open. An orphan hedge or leg
+    Place an entry of `qty` shares; when the broker refuses it for margin, retry AT ONCE with MARGIN_STEP_LOTS fewer, never below
+    MARGIN_FLOOR_LOTS (owner: 6 -> 4 -> 2; profile instances: 3 -> 2 -> 1). attempt(q) -> (ok, error, clean); `clean` = a failed attempt left nothing open. An orphan hedge or leg
     means stop: a retry would stack another position on top of it. Any refusal that is not about margin also stops.
     Returns (ok, shares_entered, last_error).
     """
     q = qty
+    step, floor = MARGIN_STEP_LOTS * NIFTY_LOT_SIZE, MARGIN_FLOOR_LOTS * NIFTY_LOT_SIZE
     while True:
         ok, err, clean = attempt(q)
         if ok:
@@ -385,12 +386,13 @@ def _enter_with_stepdown(qty: int, attempt, what: str):
                 logger.warning(f"{what}: entered {q // NIFTY_LOT_SIZE} of {qty // NIFTY_LOT_SIZE} lot(s) after margin refusals")
                 _post(f"⚠️ *Margin short* — {what}: entered *{q // NIFTY_LOT_SIZE} of {qty // NIFTY_LOT_SIZE} lot(s)*.\nNo added size on this trade.")
             return True, q, None
-        if q <= NIFTY_LOT_SIZE or not clean or not _is_margin_error(err):
+        if q <= floor or not clean or not _is_margin_error(err):
             if q != qty:
                 logger.error(f"{what}: still refused at {q // NIFTY_LOT_SIZE} lot(s) after stepping down from {qty // NIFTY_LOT_SIZE}: {err}")
             return False, q, err
-        logger.warning(f"{what}: margin refused {q // NIFTY_LOT_SIZE} lot(s) — retrying at once with {q // NIFTY_LOT_SIZE - 1}: {err}")
-        q -= NIFTY_LOT_SIZE
+        nxt = max(q - step, floor)
+        logger.warning(f"{what}: margin refused {q // NIFTY_LOT_SIZE} lot(s) — retrying at once with {nxt // NIFTY_LOT_SIZE}: {err}")
+        q = nxt
 
 
 def _spread_attempt(kite, symbol, premium, hedge_sym, hedge_ltp):

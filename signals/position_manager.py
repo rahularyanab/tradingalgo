@@ -4,7 +4,7 @@ Active position management — evaluates every 15-min candle while in a trade.
 Rules:
   STRANGLE
     Target hit                          → exit everything
-    Profit-booking ladder (both legs)   → book PROFIT_BOOK_STEP_LOTS at ₹5000, again at ₹7500
+    Profit-booking ladder (both legs)   → book PROFIT_BOOK_STEP_LOTS at PROFIT_BOOK_STEP1_PNL, again at STEP2_PNL
     Bullish ≥2/3                        → exit CE leg (going ITM), let PE decay to zero
     Bearish ≥2/3                        → exit PE leg (going ITM), let CE decay to zero
     Still range-bound + in profit,
@@ -12,7 +12,7 @@ Rules:
 
   CALL SELL (bearish position)
     Trailing profit lock                → protect gains once they've meaningfully retraced
-    Profit-booking ladder                → book lots at ₹5000 / ₹7500, rest runs to EOD
+    Profit-booking ladder                → book lots at PROFIT_BOOK_STEP1_PNL / STEP2_PNL, rest runs to EOD
     In profit + sustained bearish
     confirmation (≥MIN_SIGNAL_SCORE)     → pyramid up (cap MAX_LOTS_DIRECTIONAL)
     Opposing bullish 3/3                 → exit + enter PUT SELL (ride the reversal)
