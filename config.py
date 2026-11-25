@@ -19,6 +19,14 @@ NIFTY_EXCHANGE     = "NSE"
 NIFTY_INSTRUMENT_TOKEN = 256265   # Zerodha token for NIFTY 50 index
 NFO_EXCHANGE       = "NFO"
 UNDERLYING         = "NIFTY"
+# Which index this instance trades. A profile's [market] index = "BANKNIFTY" | "SENSEX" replaces every
+# index-dependent value in this file (see indices.py); with no profile everything below is Nifty, as always.
+INDEX              = "NIFTY"
+INDEX_LABEL        = "NIFTY"          # shown in Telegram messages
+INDEX_QUOTE_KEY    = "NSE:NIFTY 50"   # kite.ltp()/quote() key of the index itself
+EXPIRY_WEEKDAY     = 1                # Tuesday — Nifty weekly expiry (no new strangles that day)
+USE_NSE_OPTION_CHAIN = True           # try NSE's public option-chain API first, then the broker-built chain
+CHAIN_HALF_WIDTH_PTS = 1250           # the broker-built option chain covers spot +/- this many points
 
 # ── Candle settings ───────────────────────────────────────────────
 TIMEFRAME          = "15minute"
@@ -50,6 +58,8 @@ MAX_OTM_STRIKES    = 6            # never sell more than 6 strikes (300 pts) fro
 HEDGE_PRICE_MIN    = 3.0          # minimum LTP for hedge option
 HEDGE_PRICE_MAX    = 8.0          # maximum LTP for hedge option
 HEDGE_PRICE_TARGET = 5.5          # ideal LTP ~₹5-6
+TRADEABLE_LTP_MIN  = 30.0         # preferred minimum premium when picking the strike to sell
+MIN_SELL_LTP       = 10.0         # never sell an option cheaper than this
 
 # ── Risk / SL settings ───────────────────────────────────────────
 SL_BUFFER_POINTS   = 50           # spot points beyond trendline = SL

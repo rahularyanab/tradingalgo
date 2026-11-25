@@ -24,6 +24,7 @@ BOT_LOG = LOGS_DIR / "bot.log"
 STATE_FILE = LOGS_DIR / "algo_trade_state.json"
 JOURNAL_FILE = LOGS_DIR / "trade_journal.csv"
 TOKEN_FILE = HOME / ".access_token"
+OWNER_TOKEN_FILE = ROOT / ".access_token"            # the owner's Zerodha login; a Zerodha PAPER instance borrows it for market data
 SR_DB_FILE = (USER_DIR / "data" / "sr_levels.json") if USER_DIR else (ROOT / "data" / "sr_levels.json")
 ENV_FILE = (USER_DIR / ".env") if USER_DIR else None            # default instance: dotenv's normal lookup
 PROFILE_FILE = (USER_DIR / "profile.toml") if USER_DIR else (ROOT / "profile.toml")

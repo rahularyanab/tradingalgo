@@ -11,6 +11,11 @@ from typing import Optional
 
 import requests
 
+from config import (
+    UNDERLYING, NFO_EXCHANGE, INDEX_QUOTE_KEY, STRIKE_STEP, EXPIRY_WEEKDAY,
+    USE_NSE_OPTION_CHAIN, CHAIN_HALF_WIDTH_PTS, TRADEABLE_LTP_MIN,
+)
+
 logger = logging.getLogger(__name__)
 
 NSE_HEADERS = {
@@ -27,10 +32,10 @@ NSE_HEADERS = {
 }
 
 NSE_BASE   = "https://www.nseindia.com"
-NSE_OC_URL = f"{NSE_BASE}/api/option-chain-indices?symbol=NIFTY"
+NSE_OC_URL = f"{NSE_BASE}/api/option-chain-indices?symbol={UNDERLYING}"
 
 MIN_LTP_THRESHOLD    = 10.0   # ignore options with LTP < this
-TRADEABLE_LTP_MIN    = 30.0   # preferred minimum LTP for selling
+# TRADEABLE_LTP_MIN (preferred minimum LTP for selling) lives in config.py — it scales with the index.
 
 
 @dataclass
@@ -99,7 +104,7 @@ def _get_weekly_expiry(expiries: list[str], next_week: bool = False) -> str:
     """
     from datetime import datetime
     today     = datetime.now().date()
-    is_expiry = (today.weekday() == 1)   # 1 = Tuesday
+    is_expiry = (today.weekday() == EXPIRY_WEEKDAY)   # Nifty: 1 = Tuesday
 
     parsed = []
     for expiry_str in expiries:
@@ -141,6 +146,10 @@ def _calculate_max_pain(call_oi: dict, put_oi: dict) -> int:
 def fetch_option_chain(kite=None, next_week: bool = False) -> Optional[OptionChainData]:
     """next_week=True fetches the expiry AFTER the nearest one — used when the
     nearest week's premium is too thin (see LOW_PREMIUM_THRESHOLD)."""
+    if not USE_NSE_OPTION_CHAIN:
+        # Bank Nifty / Sensex: build the chain from the broker (NSE's site does not list Sensex, and its
+        # option-chain API has been refusing the bot since Oct 2026 anyway).
+        return _fetch_option_chain_from_kite(kite, next_week=next_week) if kite is not None else None
     try:
         data = _fetch_with_retry()
     except Exception as e:
@@ -272,15 +281,28 @@ def _get_nifty_instruments(kite) -> list:
     cache = _kite_instruments_cache
     if cache.get("date") == today:
         return cache["instruments"]
-    instruments = kite.instruments("NFO")
+    instruments = kite.instruments(NFO_EXCHANGE)
     nifty = [
         i for i in instruments
-        if i.get("name") == "NIFTY"
+        if i.get("name") == UNDERLYING
         and i.get("instrument_type") in ("CE", "PE")
         and i.get("expiry") and i["expiry"] >= today
     ]
     cache.update({"date": today, "instruments": nifty})
     return nifty
+
+
+_lot_warned: set = set()
+
+
+def _check_lot_size(instruments: list, expiry) -> None:
+    """P&L and order sizes use config.NIFTY_LOT_SIZE; shout (once per expiry) if the exchange's contract differs."""
+    from config import NIFTY_LOT_SIZE
+    sizes = {int(i.get("lot_size") or 0) for i in instruments if i.get("expiry") == expiry} - {0}
+    if sizes and sizes != {NIFTY_LOT_SIZE} and expiry not in _lot_warned:
+        _lot_warned.add(expiry)
+        logger.error(f"LOT SIZE MISMATCH: {UNDERLYING} {expiry} contracts have lot size {sorted(sizes)}, "
+                     f"the bot assumes {NIFTY_LOT_SIZE} — update indices.py")
 
 
 def _resolve_expiry(instruments: list, next_week: bool = False) -> tuple:
@@ -301,23 +323,25 @@ def _resolve_expiry(instruments: list, next_week: bool = False) -> tuple:
 
 def _fetch_option_chain_from_kite(kite, next_week: bool = False) -> Optional[OptionChainData]:
     try:
-        spot = float(kite.ltp(["NSE:NIFTY 50"])["NSE:NIFTY 50"]["last_price"])
-        atm  = round(spot / 50) * 50
+        spot = float(kite.ltp([INDEX_QUOTE_KEY])[INDEX_QUOTE_KEY]["last_price"])
+        atm  = round(spot / STRIKE_STEP) * STRIKE_STEP
 
         nifty_insts  = _get_nifty_instruments(kite)
         expiry_date, nse_expiry = _resolve_expiry(nifty_insts, next_week=next_week)
 
+        _check_lot_size(nifty_insts, expiry_date)
         # Build strike→symbol map from the instruments list (avoids format guessing)
         symbol_map: dict[tuple, str] = {}
         for i in nifty_insts:
             if i["expiry"] != expiry_date:
                 continue
-            symbol_map[(int(i["strike"]), i["instrument_type"])] = f"NFO:{i['tradingsymbol']}"
+            symbol_map[(int(i["strike"]), i["instrument_type"])] = f"{NFO_EXCHANGE}:{i['tradingsymbol']}"
 
         # ±25 strikes (1250 pts) — wider than the ATM proximity itself needs, because
         # OTM puts hold premium further from spot than OTM calls (volatility skew), so
         # the ₹3-8 hedge band for puts often falls outside a narrower symmetric window.
-        strikes = [atm + n * 50 for n in range(-25, 26)]
+        half = int(CHAIN_HALF_WIDTH_PTS // STRIKE_STEP)            # Nifty: 1250 / 50 = 25
+        strikes = [atm + n * STRIKE_STEP for n in range(-half, half + 1)]
         to_quote = [
             symbol_map[(s, t)]
             for s in strikes for t in ("CE", "PE")
@@ -352,7 +376,7 @@ def _fetch_option_chain_from_kite(kite, next_week: bool = False) -> Optional[Opt
                     ltp           = q.get("last_price", 0),
                     iv            = 0,
                     volume        = q.get("volume", 0),
-                    symbol        = sym.split(":", 1)[1],  # strip "NFO:" prefix
+                    symbol        = sym.split(":", 1)[1],  # strip the "NFO:" / "BFO:" prefix
                 )
 
         _oi_snapshot.update(new_snapshot)

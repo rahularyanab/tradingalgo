@@ -7,6 +7,7 @@ from kiteconnect import KiteConnect
 from config import (
     KITE_API_KEY,
     NIFTY_INSTRUMENT_TOKEN,
+    INDEX_QUOTE_KEY,
     TIMEFRAME,
     CANDLE_COUNT,
 )
@@ -48,5 +49,5 @@ def fetch_nifty_candles(kite: KiteConnect) -> pd.DataFrame:
 
 def get_current_nifty_price(kite: KiteConnect) -> float:
     """Return latest Nifty 50 price. Uses quote() which works after market close too."""
-    data = kite.quote("NSE:NIFTY 50")
-    return data["NSE:NIFTY 50"]["last_price"]
+    data = kite.quote(INDEX_QUOTE_KEY)
+    return data[INDEX_QUOTE_KEY]["last_price"]

@@ -18,6 +18,11 @@ import paths
 logger = logging.getLogger(__name__)
 
 
+
+def _label() -> str:
+    import config
+    return config.INDEX_LABEL.title()
+
 def _rs(x: float) -> str:
     return f"₹{x:,.0f}"
 
@@ -56,13 +61,15 @@ def welcome_messages(st) -> list:
         f"✅ *Connected* — hello {st.name}!",
         "This chat is now linked to your trading bot. Every entry, exit, profit booking and warning will arrive here.",
         "Entries start at 10:00 AM IST on market days; nothing happens outside market hours.",
+        *(["📝 *PAPER MODE* — real market prices, SIMULATED orders. No order ever reaches the exchange and no money is at risk; "
+            "fills are assumed at the live price, so real results would be a little worse."] if st.paper else []),
         "",
         params_message(st),
     ])
     m2 = "\n".join([
         "*How the bot trades*",
-        "• Every 15 minutes it reads Nifty: trendline support/resistance, RSI divergence and option-chain open interest.",
-        "• It sells ONE Nifty option — a call when the market looks weak, a put when it looks strong — or a strangle when it is range-bound.",
+        f"• Every 15 minutes it reads {_label()}: trendline support/resistance, RSI divergence and option-chain open interest.",
+        f"• It sells ONE {_label()} option — a call when the market looks weak, a put when it looks strong — or a strangle when it is range-bound.",
         "• Every sold option has a cheap far-out hedge bought first, so the loss on a bad day is capped.",
         "• Everything is closed by 3:25 PM the same day. Nothing is held overnight.",
         "",
@@ -94,7 +101,7 @@ def welcome_messages(st) -> list:
         "",
         "*Please remember*",
         f"1. Keep enough free margin in your account — at least {_rs(z.margin_at_start)}, more if the bot adds size.",
-        "2. Avoid trading the same Nifty options by hand. If you do close one of the bot's positions yourself, it notices within a minute or two and will not place orders against it.",
+        f"2. Avoid trading the same {_label()} options by hand. If you do close one of the bot's positions yourself, it notices within a minute or two and will not place orders against it.",
         "3. The daily loss limit is a target, not a guarantee. In a fast market the exit price can be worse; losses 30 to 50 percent beyond the limit have happened.",
         "4. If you see a warning about login or access, tell the person who set this up.",
         "5. This is a test programme, not investment advice. Options selling can lose money. Start small and watch it.",

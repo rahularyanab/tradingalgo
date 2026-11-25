@@ -4,7 +4,8 @@ Per-user profile (profile.toml) -> bot settings.
 A user edits ONE small file; everything strategy-related stays under the owner's control.
 
     [user]    name, owner                  owner = true lets this person pause every bot on the server
-    [broker]  name                         "zerodha" (Angel One is added separately)
+    [broker]  name, paper                  "zerodha" | "angel"; paper = true: real market data, SIMULATED orders
+    [market]  index                        "NIFTY" (default) | "BANKNIFTY" | "SENSEX"  (see indices.py)
     [capital] total                        rupees allocated to this bot
     [risk]    max_daily_loss               optional, default 1% of capital, refused above 1.5%
               experience                   "new" (default) | "experienced"
@@ -32,6 +33,7 @@ PLANNED_BROKERS: set = set()
 _SCHEMA = {
     "user":     {"name": str, "owner": bool},
     "broker":   {"name": str, "paper": bool},
+    "market":   {"index": str},
     "capital":  {"total": (int, float)},
     "risk":     {"max_daily_loss": (int, float), "experience": str, "preferred_lots": int, "allow_above_suggestion": bool, "allow_pyramiding": bool},
     "sizing":   {"margin_per_lot": (int, float), "loss_per_lot": (int, float)},
@@ -47,7 +49,8 @@ class Settings:
     sizing: Sizing
     config_values: dict               # config constant -> value to apply
     profile_hash: str                 # changes whenever the file's content changes
-    paper: bool = False               # simulated orders (Angel only)
+    paper: bool = False               # simulated orders, real market data
+    index: str = "NIFTY"              # which index this instance trades
     owner: bool = False               # may pause EVERY bot on the server (/pauseall)
 
 
@@ -100,9 +103,19 @@ def validate(data: dict) -> list:
             errs.append(f'broker.name = "{broker}" is not available yet — only {", ".join(sorted(SUPPORTED_BROKERS))} works today.')
         else:
             errs.append(f'broker.name = "{broker}" is not supported. Choose one of: {", ".join(sorted(SUPPORTED_BROKERS))}.')
+    mk = data.get("market") if isinstance(data.get("market"), dict) else {}
+    if isinstance(mk.get("index"), str):
+        import indices
+        try:
+            indices.values_for(mk["index"])
+        except ValueError as e:
+            errs.append(str(e))
+            mk = {}
+    # A non-Nifty index is paper-only: its contract details have never been traded with real money.
     body = data.get("broker") if isinstance(data.get("broker"), dict) else {}
-    if body.get("paper") is True and broker and broker != "angel":
-        errs.append("broker.paper = true is only available with Angel. A Zerodha profile always places real orders.")
+    idx = str(mk.get("index", "NIFTY")).strip().upper().replace(" ", "")
+    if idx != "NIFTY" and body.get("paper") is not True:
+        errs.append(f'market.index = "{idx}" runs in paper mode only: add  paper = true  under [broker].')
     return errs
 
 
@@ -161,10 +174,13 @@ def build(data: dict, config_ns: dict, raw_text: str = "") -> Settings:
     broker = str(data["broker"]["name"]).strip().lower()
     paper = bool(data["broker"].get("paper", broker == "angel"))     # Angel is paper-only until the owner says otherwise
     vals.update({"BROKER": broker, "BROKER_PAPER": paper})
+    import indices
+    index_vals = indices.values_for(data.get("market", {}).get("index", "NIFTY"))
+    vals.update(index_vals)
     vals.update(_check_overrides(data.get("overrides", {}), config_ns))     # owner overrides win
     return Settings(
         name=str(data.get("user", {}).get("name", "")).strip() or "there",
-        broker=broker, paper=paper,
+        broker=broker, paper=paper, index=index_vals["INDEX"],
         owner=bool(data.get("user", {}).get("owner", False)),
         sizing=s, config_values=vals,
         profile_hash=hashlib.sha256((raw_text or repr(sorted(data.items()))).encode()).hexdigest()[:16],
@@ -202,9 +218,14 @@ REQUIRED_SECRETS = {
 ALWAYS_REQUIRED_SECRETS = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"]
 
 
-def missing_secrets(broker: str, env: dict) -> list:
+# Zerodha paper: market data comes from the OWNER's daily Zerodha login (read-only), so only the API key is needed.
+PAPER_REQUIRED_SECRETS = {"zerodha": ["KITE_API_KEY"]}
+
+
+def missing_secrets(broker: str, env: dict, paper: bool = False) -> list:
     """Names of required secrets that are empty/absent in `env`. Telegram is mandatory: alerts are how a user stays in control."""
-    need = ALWAYS_REQUIRED_SECRETS + REQUIRED_SECRETS.get(broker, [])
+    need = ALWAYS_REQUIRED_SECRETS + ((PAPER_REQUIRED_SECRETS.get(broker) or REQUIRED_SECRETS.get(broker, [])) if paper
+                                      else REQUIRED_SECRETS.get(broker, []))
     return [k for k in need if not str(env.get(k, "")).strip()]
 
 

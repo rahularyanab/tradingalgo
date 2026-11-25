@@ -39,7 +39,7 @@ print(f"  rupee thresholds for this size: {z.thresholds}")
 for w in z.warnings:
     print(f"  ⚠️  {w}")
 
-miss = userprofile.missing_secrets(st.broker, os.environ)
+miss = userprofile.missing_secrets(st.broker, os.environ, paper=st.paper)
 print("\n" + (f"❌ missing secrets in {paths.ENV_FILE}: {', '.join(miss)}" if miss else "✅ all required secrets are filled in"))
 print("\n──────── Telegram guide preview (not sent) ────────")
 for m in onboarding.welcome_messages(st):

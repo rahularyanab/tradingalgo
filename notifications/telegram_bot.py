@@ -19,6 +19,7 @@ import requests
 from config import (
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, SL_BUFFER_POINTS,
     DASH_OI_DOMINANCE_RATIO, DASH_SL_WARN_PTS, DASH_SL_PROGRESS_WARN, DASH_SL_PROGRESS_RISK,
+    INDEX_LABEL, SETTINGS,
 )
 from signals.combiner import FinalSignal
 from signals.trade_monitor import MonitorResult, TradeState
@@ -26,6 +27,9 @@ from signals.trade_monitor import MonitorResult, TradeState
 logger = logging.getLogger(__name__)
 
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+# A paper instance stamps every alert so it can never be mistaken for a real-money bot.
+_MSG_PREFIX = f"📝 *PAPER · {INDEX_LABEL}*\n" if (SETTINGS is not None and SETTINGS.paper) else ""
 
 _PROXY   = os.getenv("HTTPS_PROXY") or os.getenv("https_proxy")
 _PROXIES = {"https": _PROXY, "http": _PROXY} if _PROXY else None
@@ -45,7 +49,7 @@ def _post(text: str) -> bool:
     try:
         resp = requests.post(
             TELEGRAM_API,
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"},
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": _MSG_PREFIX + text, "parse_mode": "Markdown"},
             timeout=10,
             proxies=_PROXIES,
         )
@@ -420,7 +424,7 @@ def _trade_verdict(trade_action: str, sig: FinalSignal, ctx: Optional[dict] = No
 
 def send_signal(signal: FinalSignal, observation: bool = False) -> bool:
     time_s, date_s = _now_str()
-    obs_tag = "👁️ *OBSERVING*" if observation else "📊 *NIFTY SCAN*"
+    obs_tag = "👁️ *OBSERVING*" if observation else f"📊 *{INDEX_LABEL} SCAN*"
     header  = f"{obs_tag}  |  {time_s}  |  {date_s}"
     obs_footer = "_No trade placed. Entry window opens at 10:00 AM._" if observation else "_No trade entry. Monitoring next candle._"
 
@@ -490,15 +494,15 @@ def send_signal(signal: FinalSignal, observation: bool = False) -> bool:
     if observation:
         action_lines = [
             f"⏳ *SIGNAL FORMING — no trade yet (entry at 10:00)*",
-            f"Would sell: `NIFTY {signal.strike} {opt_type}` @ ₹{signal.premium}  SL spot {'>' if is_call else '<'} `{signal.sl_spot_level:.0f}`",
+            f"Would sell: `{INDEX_LABEL} {signal.strike} {opt_type}` @ ₹{signal.premium}  SL spot {'>' if is_call else '<'} `{signal.sl_spot_level:.0f}`",
         ]
         trade_footer = f"_Watching one more candle. Bot enters at 10:00 if signal holds ({signal.score}/3)._"
     else:
         action_lines = [
             "─────────────────────",
-            f"🔴 *SELL* `NIFTY {signal.strike} {opt_type}` @ *₹{signal.premium}*  ({signal.lots} lots)",
+            f"🔴 *SELL* `{INDEX_LABEL} {signal.strike} {opt_type}` @ *₹{signal.premium}*  ({signal.lots} lots)",
             *(
-                [f"🟩 *BUY hedge* `NIFTY {hedge_strike} {opt_type}` @ *₹{hedge_ltp}*  _(margin)_"]
+                [f"🟩 *BUY hedge* `{INDEX_LABEL} {hedge_strike} {opt_type}` @ *₹{hedge_ltp}*  _(margin)_"]
                 if hedge_strike else []
             ),
             *(
@@ -801,7 +805,7 @@ def send_management_alert(decision, trade, spot: float, new_signal=None) -> bool
             opt_t = "CE" if new_signal.action == "CALL_SELL" else "PE"
             lines += [
                 "", f"*→ Entering {new_signal.action.replace('_',' ')}:*",
-                f"   Strike `NIFTY {new_signal.strike} {opt_t}` @ ₹{new_signal.premium}",
+                f"   Strike `{INDEX_LABEL} {new_signal.strike} {opt_t}` @ ₹{new_signal.premium}",
                 f"   Lots: {new_signal.lots}  SL: `{new_signal.sl_spot_level:.0f}`",
             ]
 
@@ -830,7 +834,7 @@ def send_level_approach_alert(trade_action: str, level, spot: float) -> bool:
     text = "\n".join([
         f"⚠️ *LEVEL ALERT  |  {time_s}  |  {date_s}*",
         "━━━━━━━━━━━━━━━━━━━━",
-        f"Your *{trade_action.replace('_', ' ')}* — Nifty approaching "
+        f"Your *{trade_action.replace('_', ' ')}* — {INDEX_LABEL.title()} approaching "
         f"{level_type} at *{level.level:.0f}*",
         "",
         f"Spot now `{spot:.1f}`  ({pts_away:.0f} pts away)",

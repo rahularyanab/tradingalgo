@@ -61,7 +61,7 @@ from config import (
     EXIT_CHASE_ENABLED, EXIT_CHASE_BUFFER_PCT, EXIT_CHASE_MIN_BUFFER,
     STRANGLE_CUTOFF_HOUR, STRANGLE_CUTOFF_MIN,
     FRIDAY_STRANGLE_CUTOFF, STRANGLE_SL_BUFFER,
-    NIFTY_LOT_SIZE,
+    NIFTY_LOT_SIZE, NFO_EXCHANGE, INDEX, INDEX_LABEL, EXPIRY_WEEKDAY,
     DAILY_MAX_LOSS, REENTRY_COOLDOWN_CANDLES, MAX_SAME_DIR_REENTRIES,
     MAX_LOTS_DIRECTIONAL, MAX_LOTS_STRANGLE_LEG, LOW_PREMIUM_THRESHOLD, MARGIN_STEP_LOTS, MARGIN_FLOOR_LOTS,
     DAY_PROFIT_ARM_PNL, DAY_PROFIT_FLOOR, PROTECTED_MAX_LOTS, PROTECTED_DELTA_EST,
@@ -461,9 +461,20 @@ def _entry_allowed() -> bool:
     return (ENTRY_START_HOUR * 60 + ENTRY_START_MIN) <= now_mins < (FORCE_EXIT_HOUR * 60 + FORCE_EXIT_MIN)
 
 
+def _is_expiry_day(now) -> bool:
+    """Nifty: every Tuesday, exactly as before. Other indices: a real expiry date of the index's options
+    (Bank Nifty is monthly and holiday-shifted), falling back to the weekday before the list is loaded."""
+    if INDEX == "NIFTY":
+        return now.weekday() == 1
+    from data.option_chain import _kite_instruments_cache as _c
+    if _c.get("instruments"):                     # loaded with every scan's option chain; holds expiries >= its load day
+        return any(i.get("expiry") == now.date() for i in _c["instruments"])
+    return now.weekday() == EXPIRY_WEEKDAY
+
+
 def _strangle_entry_allowed() -> bool:
     now = datetime.now()
-    if now.weekday() == 1:                         # Tuesday = expiry day
+    if _is_expiry_day(now):                        # Nifty: Tuesday = expiry day
         return False
     if now.weekday() == 4 and now.hour >= FRIDAY_STRANGLE_CUTOFF:
         return False                                # no new strangles Friday PM
@@ -806,7 +817,7 @@ def _unwind_hedge_slice(kite, oc, opt_type: str, hedge_symbol, hedge_strike, hed
         # order goes out as a MARKET order, which Kite refuses for NFO via the API — the hedge
         # stayed open and nothing said so. Price it from the live quote instead.
         try:
-            q = float(kite.ltp([f"NFO:{hedge_symbol}"])[f"NFO:{hedge_symbol}"]["last_price"])
+            q = float(kite.ltp([f"{NFO_EXCHANGE}:{hedge_symbol}"])[f"{NFO_EXCHANGE}:{hedge_symbol}"]["last_price"])
             if q > 0:
                 ltp = ltp or q
                 price = max(math.floor((q - 1) / 0.05) * 0.05, 0.05)
@@ -1014,7 +1025,7 @@ def _chase_exit(kite, symbol: str, qty_cap: int, attempt: int, orders: list, liv
     if symbol in live_syms:
         return False, "symbol is part of a new live trade — not chasing"
     try:
-        ltp = float(kite.ltp([f"NFO:{symbol}"])[f"NFO:{symbol}"]["last_price"])
+        ltp = float(kite.ltp([f"{NFO_EXCHANGE}:{symbol}"])[f"{NFO_EXCHANGE}:{symbol}"]["last_price"])
     except Exception as e:
         return False, f"no live price ({e}) — could not re-price"
     if ltp <= 0:
@@ -1105,7 +1116,7 @@ def verify_exit_fills(now: Optional[datetime] = None):
                      or (now - e["last_alert"]).total_seconds() / 60 >= EXIT_VERIFY_REALERT_MIN)
         if due_alert or giving_up:
             try:
-                ltp = kite.ltp([f"NFO:{e['symbol']}"])[f"NFO:{e['symbol']}"]["last_price"]
+                ltp = kite.ltp([f"{NFO_EXCHANGE}:{e['symbol']}"])[f"{NFO_EXCHANGE}:{e['symbol']}"]["last_price"]
                 mkt = f", market now {ltp}"
             except Exception:
                 mkt = ""
@@ -1636,10 +1647,10 @@ def _fail_fresh_entry(kite, trade: TradeState, legs: list, live: dict, names: st
             if not q:
                 continue
             try:
-                ltp = (kite.ltp([f"NFO:{sym}"]).get(f"NFO:{sym}") or {}).get("last_price")
+                ltp = (kite.ltp([f"{NFO_EXCHANGE}:{sym}"]).get(f"{NFO_EXCHANGE}:{sym}") or {}).get("last_price")
             except Exception:
                 ltp = None
-            r = square_off_position(kite, sym, q, "NFO", "NRML", ltp=ltp)
+            r = square_off_position(kite, sym, q, NFO_EXCHANGE, "NRML", ltp=ltp)
             undone.append(f"{'bought back' if q < 0 else 'sold'} {sym} ({'ok' if r.success else 'FAILED: ' + str(r.error)})")
     monitor.clear_trade()
     strangle_legs = None
@@ -1669,8 +1680,8 @@ def _leg_ltps(kite, trade: TradeState):
         syms.append(trade.symbol)
     if not syms:
         return None, None, None
-    data = kite.ltp([f"NFO:{s}" for s in syms])
-    px = lambda s: (data.get(f"NFO:{s}") or {}).get("last_price") or None
+    data = kite.ltp([f"{NFO_EXCHANGE}:{s}" for s in syms])
+    px = lambda s: (data.get(f"{NFO_EXCHANGE}:{s}") or {}).get("last_price") or None
     if trade.action == "STRANGLE" and sl:
         return None, (px(sl.ce_symbol) if sl.ce_active else None), (px(sl.pe_symbol) if sl.pe_active else None)
     return px(trade.symbol), None, None
@@ -2504,7 +2515,7 @@ def run_scan():
 
 
 def main():
-    logger.info("Nifty Option Selling Bot starting...")
+    logger.info(f"{INDEX_LABEL.title()} Option Selling Bot starting..." + (" [PAPER — simulated orders]" if SETTINGS is not None and SETTINGS.paper else ""))
     logger.info(f"Entry: {ENTRY_START_HOUR:02d}:{ENTRY_START_MIN:02d} → {FORCE_EXIT_HOUR:02d}:{FORCE_EXIT_MIN:02d}")
     logger.info(
         f"EOD flatten: {' and retry '.join(_eod_flatten_times())} (fill check {', '.join(_eod_verify_times())}) — everything flattens every day, "
@@ -2521,7 +2532,7 @@ def main():
 
     if SETTINGS is not None:
         import os, userprofile
-        _missing = userprofile.missing_secrets(SETTINGS.broker, os.environ)
+        _missing = userprofile.missing_secrets(SETTINGS.broker, os.environ, paper=SETTINGS.paper)
         if _missing:
             logger.error(f"Profile for {SETTINGS.name} is loaded but these secrets are missing in {_paths.ENV_FILE}: {', '.join(_missing)} — not starting.")
             sys.exit(2)

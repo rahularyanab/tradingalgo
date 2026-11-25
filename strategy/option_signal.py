@@ -26,8 +26,10 @@ from config import (
     COI_NEARBY_STRIKES,
     COI_NEARBY_FRACTION,
     MAX_OTM_STRIKES,
+    TRADEABLE_LTP_MIN,
+    MIN_SELL_LTP,
 )
-from data.option_chain import OptionChainData, StrikeData, TRADEABLE_LTP_MIN
+from data.option_chain import OptionChainData, StrikeData
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +162,7 @@ def _select_put_strike(
                 s for s in oc.put_data.values()
                 if s.strike <= max_strike
                 and s.strike >= min_strike
-                and s.ltp > 10
+                and s.ltp > MIN_SELL_LTP
             ],
             key=lambda s: s.ltp,
             reverse=True,
@@ -222,7 +224,7 @@ def _select_call_strike(
                 s for s in oc.call_data.values()
                 if s.strike >= min_strike
                 and s.strike <= max_strike
-                and s.ltp > 10
+                and s.ltp > MIN_SELL_LTP
             ],
             key=lambda s: s.ltp,
             reverse=True,

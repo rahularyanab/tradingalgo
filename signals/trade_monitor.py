@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
+from config import DASH_SL_WARN_PTS, INDEX_LABEL
 from data.option_chain import OptionChainData
 from strategy.rsi_divergence import RSIResult
 
@@ -210,12 +211,12 @@ class TradeMonitor:
                 ))
 
         # 5. Spot approaching SL level
-        if spot >= self.trade.sl_spot_level - 30:
+        if spot >= self.trade.sl_spot_level - DASH_SL_WARN_PTS:
             w.append(WarningItem(
                 severity="CRITICAL",
                 category="SL_PROXIMITY",
                 detail=(
-                    f"Nifty spot {spot:.1f} within 30pts of SL "
+                    f"{INDEX_LABEL.title()} spot {spot:.1f} within {DASH_SL_WARN_PTS}pts of SL "
                     f"{self.trade.sl_spot_level:.1f} — consider exiting"
                 ),
             ))
@@ -274,12 +275,12 @@ class TradeMonitor:
                 ))
 
         # 4. Spot approaching SL level
-        if spot <= self.trade.sl_spot_level + 30:
+        if spot <= self.trade.sl_spot_level + DASH_SL_WARN_PTS:
             w.append(WarningItem(
                 severity="CRITICAL",
                 category="SL_PROXIMITY",
                 detail=(
-                    f"Nifty spot {spot:.1f} within 30pts of SL "
+                    f"{INDEX_LABEL.title()} spot {spot:.1f} within {DASH_SL_WARN_PTS}pts of SL "
                     f"{self.trade.sl_spot_level:.1f} — consider exiting"
                 ),
             ))

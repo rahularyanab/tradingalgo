@@ -12,6 +12,8 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
+from config import NFO_EXCHANGE      # "NFO" (Nifty, Bank Nifty) or "BFO" (Sensex)
+
 logger = logging.getLogger(__name__)
 
 
@@ -48,7 +50,7 @@ def place_sell_order(
         logger.warning(f"place_sell_order called without price for {symbol} — order will likely fail")
     order_kwargs = dict(
         variety          = kite.VARIETY_REGULAR,
-        exchange         = exchange or kite.EXCHANGE_NFO,
+        exchange         = exchange or NFO_EXCHANGE,
         tradingsymbol    = symbol,
         transaction_type = kite.TRANSACTION_TYPE_SELL,
         quantity         = quantity,
@@ -83,7 +85,7 @@ def place_buy_order(
         logger.warning(f"place_buy_order called without price for {symbol} — order will likely fail")
     order_kwargs = dict(
         variety          = kite.VARIETY_REGULAR,
-        exchange         = exchange or kite.EXCHANGE_NFO,
+        exchange         = exchange or NFO_EXCHANGE,
         tradingsymbol    = symbol,
         transaction_type = kite.TRANSACTION_TYPE_BUY,
         quantity         = quantity,
@@ -119,7 +121,7 @@ def place_buy_limit_exact(
     try:
         order_id = kite.place_order(
             variety          = kite.VARIETY_REGULAR,
-            exchange         = exchange or kite.EXCHANGE_NFO,
+            exchange         = exchange or NFO_EXCHANGE,
             tradingsymbol    = symbol,
             transaction_type = kite.TRANSACTION_TYPE_BUY,
             quantity         = quantity,
@@ -177,7 +179,7 @@ def square_off_position(
 
 def _fresh_ltp(kite, symbol: str) -> Optional[float]:
     try:
-        key = f"{kite.EXCHANGE_NFO}:{symbol}"
+        key = f"{NFO_EXCHANGE}:{symbol}"
         return float(kite.quote([key])[key]["last_price"])
     except Exception as e:
         logger.warning(f"Could not fetch fresh LTP for {symbol}: {e}")

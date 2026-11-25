@@ -321,8 +321,8 @@ check("an Angel profile builds and DEFAULTS TO PAPER MODE", st.broker == "angel"
 live = GOOD.replace('name = "angel"', 'name = "angel"\npaper = false')
 check("paper = false switches real orders on", userprofile.build(userprofile.parse(live), vars(config), live).paper is False)
 zp = '[broker]\nname = "zerodha"\npaper = true\n[capital]\ntotal = 1000000\n'
-e = raises(userprofile.ProfileError, userprofile.build, userprofile.parse(zp), vars(config), zp)
-check("paper = true with Zerodha is refused (it would silently place real orders)", e is not None and "only available with Angel" in str(e), str(e))
+check("paper = true with Zerodha is a paper profile (PaperKite; see tests/test_index_paper.py)",
+      userprofile.build(userprofile.parse(zp), vars(config), zp).paper is True)
 zd = userprofile.build(userprofile.parse('[broker]\nname = "zerodha"\n[capital]\ntotal = 1000000\n'), vars(config))
 check("a Zerodha profile is never paper", zd.paper is False and zd.config_values["BROKER_PAPER"] is False)
 check("Angel needs its four secrets", userprofile.missing_secrets("angel", {}) == ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "ANGEL_API_KEY", "ANGEL_CLIENT_CODE", "ANGEL_PASSWORD", "ANGEL_TOTP_SECRET"])
