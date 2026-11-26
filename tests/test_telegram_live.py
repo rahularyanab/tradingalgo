@@ -192,9 +192,9 @@ T._paths.JOURNAL_FILE = J; T._stats_cache.clear()
 txt2 = T.welcome_text("Meera", CH)
 check("welcome shows the real record next to the 1% aim", "over 21 trades" in txt2 and "₹1,547 per lot on average" in txt2
       and "the worst cost ₹2,841" in txt2, txt2)
-check("no track-record line before the page is published", "Every trade, wins and losses" not in txt2)
 real_logs = T._paths.LOGS_DIR
-T._paths.LOGS_DIR = TMP
+T._paths.LOGS_DIR = TMP                                   # never the real logs (on the server the page IS published)
+check("no track-record line before the page is published", "Every trade, wins and losses" not in T.welcome_text("Meera", CH))
 (TMP / "telegraph.json").write_text(json.dumps({"url": "https://telegra.ph/Theta-Desk--live-track-record-11-26"}))
 check("published: welcome links the track record", "📊 Every trade, wins and losses: https://telegra.ph/Theta-Desk--live-track-record-11-26"
       in T.welcome_text("Meera", CH))
