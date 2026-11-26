@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh the public track-record page (Telegraph) — only if it has been published once
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/trading-algo
+ExecStart=/opt/trading-algo/venv/bin/python -m publish.track_record update

@@ -23,6 +23,7 @@ ONLY to ask Zerodha for margin figures (a read-only call). It never places order
 """
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import re
@@ -64,12 +65,15 @@ CHARGES = {
     "gst": 0.18,                        # on brokerage + exchange + SEBI
 }
 
-BUTTONS = [["📍 Trade & SL", "💰 Margin"], ["🧾 Charges", "📈 P&L"], ["⚙️ Lot size", "🔔 Alerts"], ["💳 Subscribe"]]
-BUTTON_CMD = {"💳 Subscribe": "/subscribe", "📍 Trade & SL": "/trade", "💰 Margin": "/margin", "🧾 Charges": "/charges",
+BUTTONS = [["📍 Trade & SL", "💰 Margin"], ["🧾 Charges", "📈 P&L"], ["⚙️ Lot size", "🔔 Alerts"],
+           ["💳 Subscribe", "🎁 Invite friends"]]
+REF_DAYS = 30                                  # free days earned when a friend you invited pays for the first time
+BUTTON_CMD = {"🎁 Invite friends": "/invite", "💳 Subscribe": "/subscribe", "📍 Trade & SL": "/trade", "💰 Margin": "/margin", "🧾 Charges": "/charges",
               "📈 P&L": "/pnl", "⚙️ Lot size": "/size", "🔔 Alerts": "/alerts"}
 COMMANDS = [
     {"command": "start", "description": "Start: pick your lot size and get trade alerts"},
     {"command": "subscribe", "description": "Subscribe or renew — we'll message you payment details"},
+    {"command": "invite", "description": "Your invite link — a free month for every friend who subscribes"},
     {"command": "trade", "description": "Open trade at your size, with stop-loss"},
     {"command": "margin", "description": "Margin needed for the trade at your size"},
     {"command": "charges", "description": "Estimated charges for the trade at your size"},
@@ -675,6 +679,18 @@ def _keyboard() -> dict:
     return {"keyboard": [[{"text": b} for b in row] for row in BUTTONS], "resize_keyboard": True, "is_persistent": True}
 
 
+def ref_code(cid: str) -> str:
+    return hashlib.sha256(f"thetadesk-ref:{cid}".encode()).hexdigest()[:8]
+
+
+def ref_link(cid: str, bot_username: str) -> str:
+    return f"https://t.me/{bot_username or 'ThetaDeskINbot'}?start=ref_{ref_code(cid)}"
+
+
+def referrer_of(subs: dict, code: str) -> Optional[str]:
+    return next((c for c in subs if ref_code(c) == code), None)
+
+
 def pay_button() -> dict:
     return {"inline_keyboard": [[{"text": "💳 I want to continue", "callback_data": "pay:request"}]]}
 
@@ -747,6 +763,8 @@ def owner_command(cmd: str, args: list, subs: dict, now: datetime, settings: dic
                         + (f" → {_date(end)}" if end and st != "owner" else "")
                         + (f" · paid ₹{paid:,.0f}" if paid else "")
                         + (" · blocked bot" if sub.get("blocked") else "")
+                        + (f" · via {html.escape(subs.get(sub['referred_by'], {}).get('name') or sub['referred_by'])}"
+                           if sub.get("referred_by") else "")
                         + (f" · 🤖 exec (seen {seen[cid]['at'][5:16].replace('T', ' ')})" if sub.get("exec_key_sha256") and cid in seen
                            else (" · 🤖 exec (never connected)" if sub.get("exec_key_sha256") else "")))
         counts = {}
@@ -789,9 +807,21 @@ def owner_command(cmd: str, args: list, subs: dict, now: datetime, settings: dic
         except (IndexError, ValueError, AssertionError):
             return "Usage: /paid &lt;who&gt; &lt;months 1–24&gt; [amount]"
         end = A.add_paid(sub, now, months, amount, "owner")
+        bonus = ""
+        ref_by = sub.get("referred_by")
+        if ref_by and ref_by in subs and not sub.get("ref_rewarded") and ref_by != str(settings.get("owner_id") or ""):
+            rsub = subs[ref_by]
+            A.ensure_trial(rsub, now)
+            r_end = A.extend(rsub, now, REF_DAYS)
+            rsub["ref_days_earned"] = rsub.get("ref_days_earned", 0) + REF_DAYS
+            sub["ref_rewarded"] = now.isoformat(timespec="seconds")
+            send(ref_by, (f"🎁 <b>{html.escape(sub.get('name') or 'Your friend')}</b> subscribed through your invite — "
+                          f"you've got <b>{REF_DAYS} days free</b>. Your access now runs until <b>{_date(r_end)}</b>."), _keyboard())
+            bonus = f" Referral: {html.escape(rsub.get('name') or ref_by)} got {REF_DAYS} free days (until {_date(r_end)})."
         save_subs(subs)
         send(cid, f"✅ Payment received — thank you!\nLive trade alerts are on until <b>{_date(end)}</b>.", _keyboard())
-        return f"✅ {name}: paid {months} month{'s' if months != 1 else ''}" + (f" (₹{amount:,.0f})" if amount else "") + f" → access until {_date(end)}. They've been told."
+        return (f"✅ {name}: paid {months} month{'s' if months != 1 else ''}" + (f" (₹{amount:,.0f})" if amount else "")
+                + f" → access until {_date(end)}. They've been told." + bonus)
     if cmd == "/extend":
         try:
             days = int(args[1])
@@ -895,6 +925,12 @@ def reply_for(text: str, chat_id: str, first_name: str, settings: dict, username
             sub = subs[chat_id] = {"plan": "standard", "alerts": True, "name": first_name[:40],
                                    "username": username or None, "joined": now.isoformat(timespec="seconds")}
             A.ensure_trial(sub, now)
+            arg = words[1] if len(words) > 1 else ""
+            ref_by = referrer_of(subs, arg[4:]) if arg.startswith("ref_") else None
+            if ref_by and ref_by != chat_id:
+                sub["referred_by"] = ref_by
+                send(ref_by, (f"🎉 <b>{html.escape(first_name or 'A friend')}</b> joined through your invite link. "
+                              f"When they subscribe, you get <b>{REF_DAYS} days free</b>."), None)
             save_subs(subs)
         A.ensure_trial(sub, now)
         if not A.has_access(sub, now, is_owner):
@@ -902,6 +938,16 @@ def reply_for(text: str, chat_id: str, first_name: str, settings: dict, username
         return (welcome_text(first_name, channel) + "\n\n" + access_line(sub, now, is_owner), _size_buttons())
 
     A.ensure_trial(sub, now)
+    if cmd == "/invite":                                     # works at any time, like /subscribe
+        if is_owner:
+            return ("You're the owner — invite links are for members.", _keyboard())
+        mine = [s_ for s_ in subs.values() if s_.get("referred_by") == chat_id]
+        paid_n = sum(1 for s_ in mine if s_.get("ref_rewarded"))
+        link = ref_link(chat_id, settings.get("bot_username", ""))
+        return ((f"🎁 <b>Invite friends, get months free</b>\n"
+                 f"Share your personal link. For every friend who joins through it and <b>subscribes</b>, "
+                 f"you get <b>{REF_DAYS} days free</b> — no limit.\n\n{link}\n\n"
+                 f"So far: {len(mine)} joined · {paid_n} subscribed · {paid_n * REF_DAYS} free days earned."), _keyboard())
     if cmd == "/subscribe":                                  # works at any time: trial, paid or expired
         if is_owner:
             return ("You're the owner — subscriptions are for members.", _keyboard())
@@ -1110,6 +1156,7 @@ def main():
     tg = TG(settings["token"])
     me = tg.call("getMe")
     tg.username = (me.get("result") or {}).get("username", "")
+    settings["bot_username"] = tg.username
     tg.call("setMyCommands", commands=COMMANDS)
     logger.info(f"Telegram live: bot @{tg.username} · channel {settings['channel'] or '(none)'} · "
                 f"{'LIVE' if settings['live'] else 'DRY RUN'}")

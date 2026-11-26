@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh the public track record after each trading day
+
+[Timer]
+OnCalendar=Mon..Fri 15:50 Asia/Kolkata
+Persistent=true
+
+[Install]
+WantedBy=timers.target

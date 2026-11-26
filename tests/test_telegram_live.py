@@ -8,7 +8,7 @@ The main scenario replays Rahul's REAL trades of 26 Nov 2026 (both entries were 
   12:15 CALL_SELL 26000 STRONG,   2 lots @180.00 → 14:00 book 1 lot +₹5,346 → 14:45 last lot +₹1,732
 Run from the repo root:   python3 tests/test_telegram_live.py          (add -v to print messages)
 """
-import json, os, sys, tempfile
+import json, os, re, sys, tempfile
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -357,7 +357,7 @@ side = []
 send = lambda cid, text, markup=None: side.append((cid, text, markup))
 ST = {"channel": CH, "owner_id": OWNER, "delay_min": 0}
 T.reply_for("/start", "801", "Kiran", ST, "kiran_r", send)
-check("keyboard has 💳 Subscribe, menu has /subscribe", ["💳 Subscribe"] in T.BUTTONS
+check("keyboard has 💳 Subscribe, menu has /subscribe", "💳 Subscribe" in T.BUTTONS[3]
       and T.COMMANDS[1]["command"] == "subscribe" and T._keyboard()["keyboard"][3][0]["text"] == "💳 Subscribe")
 CLOCK[0] = datetime(2026, 12, 8, 11, 0, tzinfo=IST)                    # day 3 of the free month
 txt, kb = T.reply_for("💳 Subscribe", "801", "Kiran", ST, "kiran_r", send)
@@ -380,6 +380,40 @@ check("expired member: /subscribe still works (not blocked by the paywall)", "ge
 T.reply_for("/start", OWNER, "Rahul", ST, "", send)
 txt, _ = T.reply_for("/subscribe", OWNER, "Rahul", ST, "", send)
 check("owner: no request to self", "You're the owner" in txt)
+
+print("referrals")
+tg, pub = reset("referral")
+CLOCK[0] = datetime(2026, 12, 5, 11, 0, tzinfo=IST)
+side = []
+send = lambda cid, text, markup=None: side.append((cid, text, markup))
+ST = {"channel": CH, "owner_id": OWNER, "delay_min": 0, "bot_username": "ThetaDeskINbot"}
+T.reply_for("/start", OWNER, "Rahul", ST, "", send)
+T.reply_for("/start", "901", "Asha", ST, "asha_k", send)
+txt, _ = T.reply_for("🎁 Invite friends", "901", "Asha", ST, "asha_k", send)
+link = re.search(r"https://t\.me/ThetaDeskINbot\?start=ref_([0-9a-f]{8})", txt)
+check("invite button: personal link + the rule + counts", link and "30 days free" in txt and "0 joined · 0 subscribed" in txt, txt)
+check("menu has /invite; keyboard row 4 = Subscribe + Invite", any(c["command"] == "invite" for c in T.COMMANDS)
+      and [b_["text"] for b_ in T._keyboard()["keyboard"][3]] == ["💳 Subscribe", "🎁 Invite friends"])
+T.reply_for(f"/start ref_{link.group(1)}", "902", "Ravi", ST, "ravi_s", send)
+check("friend joins via the link → linked, inviter told", T.load_subs()["902"].get("referred_by") == "901"
+      and side[-1][0] == "901" and "Ravi" in side[-1][1] and "joined through your invite" in side[-1][1])
+T.reply_for(f"/start ref_{link.group(1)}", "902", "Ravi", ST, "ravi_s", send)
+T.reply_for(f"/start ref_{T.ref_code('902')}", "901", "Asha", ST, "asha_k", send)
+check("existing members can't be re-referred; no self/loop referral", T.load_subs()["902"]["referred_by"] == "901"
+      and "referred_by" not in T.load_subs()["901"])
+T.reply_for("/start ref_deadbeef", "903", "Dev", ST, "", send)
+check("unknown code: joins normally, no link", "referred_by" not in T.load_subs()["903"])
+before = A_.access_until(T.load_subs()["901"])
+txt, _ = T.reply_for("/paid ravi 1 999", OWNER, "Rahul", ST, "", send)
+after = A_.access_until(T.load_subs()["901"])
+check("friend's first payment → inviter +30 days, both told, owner sees it", (after - before).days == 30
+      and "Referral: Asha got 30 free days" in txt and any(m[0] == "901" and "30 days free" in m[1] for m in side), txt)
+T.reply_for("/paid ravi 1 999", OWNER, "Rahul", ST, "", send)
+check("only the FIRST payment rewards", A_.access_until(T.load_subs()["901"]) == after)
+txt, _ = T.reply_for("/invite", "901", "Asha", ST, "asha_k", send)
+check("counts update", "1 joined · 1 subscribed · 30 free days earned" in txt, txt)
+txt, _ = T.reply_for("/members", OWNER, "Rahul", ST, "", send)
+check("/members shows who brought whom", "Ravi @ravi_s" in txt and "via Asha" in txt, txt)
 
 print("channel runs 15 min late")
 tg, pub = reset("delay", delay=15)
