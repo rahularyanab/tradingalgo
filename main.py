@@ -45,6 +45,7 @@ import schedule
 import paths as _paths
 import control as _control
 import entry_guard as _entry_guard
+from publish import signal_feed as _feed
 _paths.ensure_dirs()          # per-instance logs/ and data/ (no-op for the default instance)
 
 from auth.kite_login import load_access_token
@@ -295,6 +296,7 @@ def _record_trade_exit(
 
     send_trade_journal_entry(trade, exit_ltp, hedge_exit_ltp, main_pnl, hedge_pnl, total_pnl, spot, exit_reason,
                               exit_detail=exit_detail)
+    _feed.trade_exit(trade, exit_ltp, total_pnl, exit_reason, spot)
 
     # A stop was sent to the broker — "accepted" is not "filled". Have the next
     # fill check confirm the sold leg is really gone (verify_exit_fills).
@@ -444,6 +446,18 @@ def _get_kite():
         _kite = _broker.make_client(token)
         _kite_token = token
     return _kite
+
+
+PNL_SNAPSHOT_TIMES = ["10:15", "11:15", "12:15", "13:15", "14:15", "15:15"]
+PNL_CLOSE_SNAPSHOT_TIME = "15:35"          # after the EOD flatten and its fill checks
+
+
+def feed_pnl_snapshot(label: str = "HOURLY"):
+    """Hourly P&L line for the public signal feed. Weekdays only; the publisher skips holidays
+    (no trades, flat) so this never needs a holiday calendar."""
+    if datetime.now().weekday() >= 5:
+        return
+    _feed.pnl_snapshot(_day_realised_pnl, monitor.trade, label=label)
 
 
 def _is_market_open() -> bool:
@@ -1275,6 +1289,10 @@ def _enter_strangle(kite, signal, qty: int, spot: float, oc, pyramid_disabled: b
             pyramid_disabled=pyramid_disabled or entered != qty,
         ))
         _register_strangle(signal, spot, oc)
+        _feed.trade_entry(monitor.trade, spot, strangle={
+            "ce_strike": signal.call_strike, "ce_symbol": signal.call_symbol, "ce_price": signal.call_premium,
+            "pe_strike": signal.put_strike, "pe_symbol": signal.put_symbol, "pe_price": signal.put_premium,
+        })
         _save_state()
         return True
 
@@ -1714,6 +1732,7 @@ def guard_check():
             unrealised = _current_unrealised(trade, strangle_legs, cur, ce, pe)
             if unrealised is None:
                 return
+            _feed.mark(unrealised, spot)
             total_today = _day_realised_pnl + unrealised
             if total_today > _day_floor():
                 return
@@ -2005,6 +2024,10 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
             monitor.trade.lots = old_qty + add_qty
             monitor.trade.entry_premium = legs.ce_entry_premium + legs.pe_entry_premium
             monitor.trade.pyramid_confirm_count = 0
+            _feed.trade_add(monitor.trade, add_qty, [
+                {"leg": "CE", "strike": legs.ce_strike, "price": ce_add_prem},
+                {"leg": "PE", "strike": legs.pe_strike, "price": pe_add_prem},
+            ])
             _post(
                 f"📈 *PYRAMID ADD*\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -2033,6 +2056,7 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
             monitor.trade.entry_premium = (trade.entry_premium * old_qty + add_prem * add_qty) / new_qty
             monitor.trade.lots = new_qty
             monitor.trade.pyramid_confirm_count = 0
+            _feed.trade_add(monitor.trade, add_qty, [{"leg": opt_type, "strike": trade.strike, "price": add_prem}])
             _post(
                 f"📈 *PYRAMID ADD*\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -2212,6 +2236,7 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
                         hedge_entry_premium=hedge_ltp,
                         pyramid_disabled=new_qty != want_qty,
                     ))
+                    _feed.trade_entry(monitor.trade, spot)
                     _save_state()
                 else:
                     send_error_alert(f"Directional re-entry failed: {entry_err}")
@@ -2330,6 +2355,7 @@ def run_scan():
             # letting it ride to its own point-based SL (which can be well
             # past the cap at larger, pyramided lot sizes).
             unrealised_now = _current_unrealised(trade, strangle_legs, current_ltp, strangle_ce_ltp, strangle_pe_ltp)
+            _feed.mark(unrealised_now, spot)
             if unrealised_now is not None:
                 total_today = _day_realised_pnl + unrealised_now
                 if total_today <= _day_floor():
@@ -2449,6 +2475,7 @@ def run_scan():
                             hedge_entry_premium=hedge_ltp,
                             pyramid_disabled=pyramid_disabled_flag or qty != want,
                         ))
+                        _feed.trade_entry(monitor.trade, spot)
                         if is_reentry:
                             _reentry_count[final.action] = _reentry_count.get(final.action, 0) + 1
                             logger.info(f"STRONG re-entry #{_reentry_count[final.action]} for {final.action}")
@@ -2568,6 +2595,10 @@ def main():
     for t in _eod_verify_times():
         schedule.every().day.at(t).do(verify_eod_flatten, final=(t == _eod_verify_times()[-1]))
     schedule.every(GUARD_INTERVAL_SECONDS).seconds.do(guard_check)
+    # Public signal feed: hourly P&L lines, plus a closing line once the day is flat.
+    for t in PNL_SNAPSHOT_TIMES:
+        schedule.every().day.at(t).do(feed_pnl_snapshot)
+    schedule.every().day.at(PNL_CLOSE_SNAPSHOT_TIME).do(feed_pnl_snapshot, label="CLOSE")
 
     while True:
         schedule.run_pending()

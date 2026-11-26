@@ -12,6 +12,7 @@ from types import SimpleNamespace as NS
 
 sys.path.insert(0, os.getcwd())
 os.environ["TELEGRAM_BOT_TOKEN"] = os.environ["TELEGRAM_CHAT_ID"] = ""     # tests must never post to the live Telegram bot (the local .env holds its token)
+os.environ["SIGNAL_FEED"] = "0"                                        # fake trades must never reach the public signal outbox (logs/signal_outbox.jsonl)
 import main
 
 TMP = Path(tempfile.mkdtemp())
