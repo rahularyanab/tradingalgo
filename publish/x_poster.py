@@ -7,6 +7,7 @@ Runs as its OWN process (systemd: signal-publisher.service), never inside the tr
 Daily plan (market days only — weekdays not listed in publish/nse_holidays.txt), at most
 DAILY_CAP posts:
     09:00        greeting: follow the account to get live trades
+    09:05        one trading-wisdom line, rotating through publish/quotes.py
     09:15        first scan result (bias, levels) + "trades start at 10:00 sharp"
     ~10:00 on    a post when a position OPENS and when it fully CLOSES (with its per-lot result)
     hourly       P&L update — skipped within 30 min of a trade post, and dropped first when
@@ -72,6 +73,7 @@ DAILY_CAP = 10
 MODEL_LOTS = F.STANDARD                                    # STRONG 3 · MODERATE 2 · STRANGLE 1/leg (Rahul, 2026-11-26)
 POLL_SEC = 15
 GREETING_FROM, GREETING_UNTIL = dtime(9, 0), dtime(9, 15)
+QUOTE_FROM, QUOTE_UNTIL = dtime(9, 5), dtime(9, 15)       # daily trading-wisdom line (publish/quotes.py)
 SCAN_FROM, SCAN_UNTIL = dtime(9, 15), dtime(9, 45)
 QUIET_AFTER_TRADE = 30 * 60         # no hourly line within this long after a trade post
 SNAPSHOT_MAX_AGE = 20 * 60          # skip an hourly P&L line older than this
@@ -156,6 +158,12 @@ def is_market_day(d: date, holidays: Optional[set] = None) -> bool:
 
 
 # ── post texts ───────────────────────────────────────────────────────────────
+
+def quote_text(idx: int, d: date) -> str:
+    from publish.quotes import QUOTES
+    q = QUOTES[idx % len(QUOTES)]
+    return _fit(f"{q}\n\n— Theta Desk · {_day_label(d)}\n#TradingWisdom #Nifty")      # the date keeps repeats unique
+
 
 def greeting_text(d: date) -> str:
     return _fit(
@@ -343,7 +351,7 @@ def _read_events() -> list:
 
 
 def _fresh_day(d: date) -> dict:
-    return {"date": d.isoformat(), "posts": 0, "greeted": False, "scanned": False, "closed": False,
+    return {"date": d.isoformat(), "posts": 0, "greeted": False, "quoted": False, "scanned": False, "closed": False,
             "last_trade_post": None, "trades": []}
 
 
@@ -521,6 +529,13 @@ def run_once(creds: dict, live: bool, poster=post_to_x, now: Optional[datetime] 
                 and GREETING_FROM <= now.time() < GREETING_UNTIL):
             _send(greeting_text(now.date()), cur, creds, live, poster, "greeting")
             day["greeted"] = True
+            _write_cursor(cur)
+        if (not day.get("quoted") and is_market_day(now.date(), holidays)
+                and QUOTE_FROM <= now.time() < QUOTE_UNTIL):
+            idx = int(cur.get("quote_idx", 0))
+            if _send(quote_text(idx, now.date()), cur, creds, live, poster, f"quote {idx}"):
+                cur["quote_idx"] = idx + 1                    # rotation only moves on when it really went out
+            day["quoted"] = True
             _write_cursor(cur)
         for ev in sorted(events, key=lambda e: e.get("seq", 0)):
             if ev.get("seq", 0) <= cur["seq"]:

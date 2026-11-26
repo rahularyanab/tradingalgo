@@ -1,0 +1,31 @@
+"""Theta Desk's daily trading-wisdom lines, posted on X at 09:05 IST on market days, in this order,
+round and round. All 25 approved by Rahul on 2026-11-27. Add new ones at the END (the rotation index
+is stored, so inserting earlier would shift what comes next)."""
+
+QUOTES = [
+    "Buyers pay for hope. Sellers get paid for patience.",
+    "Time decay doesn't care about your opinion. That's why we sell it.",
+    "Every morning the option buyer starts behind. We start ahead and try not to give it back.",
+    "Theta is the only edge that shows up for work every single day.",
+    "We don't predict where Nifty goes. We bet on where it won't.",
+    "Selling options is collecting rent. Respecting the stop-loss is fire insurance.",
+    "A small loss is a business expense. A big loss is a business decision you didn't make in time.",
+    "The stop-loss isn't where you're wrong. It's where you agreed in advance to stop arguing.",
+    "You can't control the market. You can control how much it's allowed to take.",
+    "Protect the capital first. Profits are what's left over when you do.",
+    "Every account that blew up had a trade that was \"definitely coming back.\"",
+    "Hedged positions sleep better.",
+    "The algo has no ego, no FOMO and no revenge trades. That's the whole edge.",
+    "Rules don't get tired at 2:45 PM. Humans do.",
+    "Same rules on green days, same rules on red days. That's what makes it a system.",
+    "Most traders have a strategy. Few have the discipline to follow it on day 37.",
+    "Boring is a feature. Excitement is usually a fee.",
+    "No trade is also a position.",
+    "Anyone can post winners. We post every trade.",
+    "Judge a strategy by its worst month, not its best screenshot.",
+    "53% wins with small losses beats 90% wins with one disaster.",
+    "Compounding needs two things: an edge, and staying in the game long enough to use it.",
+    "The market rewards consistency far more than it rewards brilliance.",
+    "One great day proves nothing. A hundred average days prove everything.",
+    "Show me the drawdown and I'll tell you if the profits are real.",
+]

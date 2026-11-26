@@ -22,6 +22,8 @@ IST = xp.IST
 PASS, FAIL = [], []
 CLOCK = [datetime(2026, 11, 27, 8, 0, tzinfo=IST)]
 feed._now = lambda: CLOCK[0]                     # feed events are stamped with the simulated clock
+QUOTE_WINDOW = (xp.QUOTE_FROM, xp.QUOTE_UNTIL)
+xp.QUOTE_FROM = xp.QUOTE_UNTIL = xp.dtime(0, 0)     # off in the trade-post scenarios; section 6b turns it on
 xp.HOLIDAYS_FILE = TMP / "holidays.txt"
 xp.HOLIDAYS_FILE.write_text("2026-12-25  # Christmas\n")
 
@@ -278,6 +280,35 @@ at(2026, 12, 9, 9, 0); xp.run_once({}, False, poster=fake_send, now=CLOCK[0])
 check("dry run: nothing sent, text in the log, counted toward the cap",
       SENT == [] and "Good morning" in xp.DRYRUN_LOG.read_text()
       and json.loads(xp.CURSOR.read_text())["day"]["posts"] == 1)
+
+# ── 6b. daily trading-wisdom line at 09:05 ───────────────────────────────────
+print("daily quote")
+from publish.quotes import QUOTES
+xp.QUOTE_FROM, xp.QUOTE_UNTIL = QUOTE_WINDOW
+reset("quote")
+at(2026, 12, 14, 8, 50); tick()
+at(2026, 12, 14, 9, 0); tick()
+check("09:00 greeting only, no quote yet", len(SENT) == 1 and "Good morning" in SENT[0][1])
+at(2026, 12, 14, 9, 5); tick(); tick()
+check("09:05 the first quote, once", len(SENT) == 2 and SENT[1][1].startswith(QUOTES[0]) and "— Theta Desk · Mon 14 Dec" in SENT[1][1])
+for d in (15, 16):
+    at(2026, 12, d, 9, 5); tick()
+qs = [x[1] for x in SENT if "— Theta Desk ·" in x[1]]
+check("rotates day by day", [q.split("\n")[0] for q in qs] == QUOTES[:3], [q[:30] for q in qs])
+at(2026, 12, 19, 9, 5); tick()
+check("no quote on Saturday", not SENT[-1][1].startswith(QUOTES[3]) or SENT[-1][0] != "09:05" or "19 Dec" not in SENT[-1][1])
+at(2026, 12, 25, 9, 5); tick()
+check("no quote on an NSE holiday (25 Dec)", "25 Dec" not in SENT[-1][1])
+n = len(SENT)
+at(2026, 12, 21, 9, 20); tick()
+check("missed the 9:05–9:15 window: skipped, not posted late", len(SENT) == n)
+at(2026, 12, 22, 9, 6); tick()
+check("…and the rotation continues where it left off", SENT[-1][1].startswith(QUOTES[3]))
+c = json.loads(xp.CURSOR.read_text())
+check("quote counts toward the daily cap", c["day"]["posts"] == 2)
+check("all 25 quotes fit in 280 with their footer", all(xp._weight(xp.quote_text(i, xp.date(2026, 12, 30))) <= 280
+      and xp.quote_text(i, xp.date(2026, 12, 30)).startswith(QUOTES[i]) for i in range(len(QUOTES))))
+check("after 25 it starts again from the first", xp.quote_text(25, xp.date(2027, 1, 4)).startswith(QUOTES[0]))
 
 # ── 7. credentials ────────────────────────────────────────────────────────────
 print("credentials")
