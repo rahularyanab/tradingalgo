@@ -18,6 +18,7 @@ Event schema (v1) — one JSON object per line:
   EXIT:    leg ("CE" | "PE" | "BOTH"), strike, exit_price, lots_closed, lots_open (after), position_closed,
            reason, pnl (₹, owner's, net of hedge), points (₹ per share = per unit of premium),
            pnl_per_start_lot (pnl ÷ starting lots of the position)
+  SCAN:    action, strength, score, spot, pcr, resistance, support, call_wall, put_wall (observe-only scans)
   PNL_SNAPSHOT: label, day_realised, unrealised (None if no fresh mark), day_total, mark_age_sec,
            day_per_start_lot, open_per_start_lot, trades_closed_today, position_open, lots_open, spot
 
@@ -236,6 +237,24 @@ def trade_exit(trade, exit_price, pnl: float, reason: str, spot: float) -> Optio
     if position_closed:
         day["trades_closed"] += 1
         st["position"] = None
+    out = _append(st, event)
+    _save_state(st)
+    return out
+
+
+@_guard
+def scan_result(final, spot: float) -> Optional[dict]:
+    """An observe-only scan (before 10:00 or after the entry window). Only the bias is
+    recorded — no strike or premium — so nothing here can be traded on before the bot trades."""
+    st = _load_state()
+    event = {
+        "type": "SCAN", "action": final.action, "strength": final.strength, "score": final.score,
+        "spot": _r(spot), "pcr": _r(getattr(final, "pcr", None)),
+        "resistance": _r(getattr(final, "resistance_level", None), 0),
+        "support": _r(getattr(final, "support_level", None), 0),
+        "call_wall": getattr(final, "call_wall", None) or None,
+        "put_wall": getattr(final, "put_wall", None) or None,
+    }
     out = _append(st, event)
     _save_state(st)
     return out

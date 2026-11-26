@@ -1,0 +1,4 @@
+# NSE trading holidays that fall on weekdays. The X poster posts nothing on these days
+# (no greeting, no scan, no close). One date per line, YYYY-MM-DD; text after # is ignored.
+# UPDATE THIS every December from NSE's official holiday circular for the next year.
+2026-12-25  # Christmas

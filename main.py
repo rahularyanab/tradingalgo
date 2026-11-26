@@ -2530,6 +2530,7 @@ def run_scan():
                 spot_price=spot, expiry=oc.weekly_expiry_date,
             )
             send_signal(final, observation=True)
+            _feed.scan_result(final, spot)       # the 9:15 scan is posted publicly ("trades start at 10:00")
 
         _save_state()
 
