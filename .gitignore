@@ -17,3 +17,6 @@ venv/
 pause_all.flag
 .paused
 .angel_verified
+
+# X (Twitter) keys for the signal publisher
+x.env

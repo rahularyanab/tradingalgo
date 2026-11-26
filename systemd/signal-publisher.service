@@ -1,0 +1,21 @@
+[Unit]
+Description=Signal publisher — posts the Nifty bot's signal feed to X (dry run unless X_LIVE=1 in x.env)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/trading-algo
+# Deliberately NOT the trading bot's .env: X keys live in x.env (read by the poster itself, chmod 600),
+# and the trading bot's secrets never reach this process.
+ExecStart=/opt/trading-algo/venv/bin/python -m publish.x_poster
+Restart=always
+RestartSec=30
+MemoryMax=120M
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=signal-publisher
+
+[Install]
+WantedBy=multi-user.target
