@@ -99,39 +99,45 @@ at(2026, 11, 27, 8, 50); tick()                                  # poster alread
 check("nothing before 9:00", SENT == [])
 at(2026, 11, 27, 9, 0); tick()
 at(2026, 11, 27, 9, 5); tick()
-check("9:00 greeting, once", len(SENT) == 1 and SENT[0][0] == "09:00" and "Follow @ThetaDeskIN" in SENT[0][1], SENT)
+check("9:00 greeting, once, explains the fixed sizes", len(SENT) == 1 and SENT[0][0] == "09:00" and "Follow @ThetaDeskIN" in SENT[0][1]
+      and "Size: 3 lots strong · 2 moderate · 2/leg strangle" in SENT[0][1] and SENT[0][1].endswith(xp.HASHTAGS), SENT)
 at(2026, 11, 27, 9, 15); scan(); tick()
 at(2026, 11, 27, 9, 30); scan("STRANGLE"); tick()                # second pre-10:00 scan: not posted
 check("9:15 first scan, once", len(SENT) == 2 and "First scan 09:15" in SENT[1][1]
       and "Bearish — favours selling calls (2/3)" in SENT[1][1] and "trading starts 10:00 sharp" in SENT[1][1], SENT[-1])
 check("scan shows no strike or premium", "24500 CE" not in SENT[1][1] and "₹" not in SENT[1][1])
-at(2026, 11, 27, 10, 0); t = directional(6); feed.trade_entry(t, 24300); tick()
-check("10:00 entry posted", len(SENT) == 3 and SENT[2][0] == "10:00" and "Sold 24500 CE @ ₹100.00" in SENT[2][1], SENT[-1])
+at(2026, 11, 27, 10, 0); t = directional(6); feed.trade_entry(t, 24300, strength="STRONG"); tick()
+check("10:00 entry posted at the MODEL size: strong = 3 lots (owner filled 6)",
+      len(SENT) == 3 and SENT[2][0] == "10:00" and "Sold 3 lots 24500 CE @ ₹100.00" in SENT[2][1]
+      and "strong signal" in SENT[2][1] and "Hedge: bought 3 lots 24800 CE" in SENT[2][1], SENT[-1])
 at(2026, 11, 27, 10, 15); feed.mark(-650, 24310); snapshot(0, t); tick()
 check("10:15 hourly skipped (trade post 15 min ago)", len(SENT) == 3)
 at(2026, 11, 27, 10, 40); t.lots = 12 * LOT; t.entry_premium = 95.0
 feed.trade_add(t, 6 * LOT, [{"leg": "CE", "strike": 24500, "price": 90.0}]); tick()
 check("pyramid add: no post", len(SENT) == 3)
 at(2026, 11, 27, 11, 15); feed.mark(13000, 24250); snapshot(0, t); tick()
-check("11:15 hourly posted, per lot", len(SENT) == 4 and "Day P&L: +₹2,167 per lot" in SENT[3][1], SENT[-1])
+check("11:15 hourly at model size (13000/6 × 3)", len(SENT) == 4 and "Day P&L: +₹6,500" in SENT[3][1], SENT[-1])
 at(2026, 11, 27, 11, 40); feed.trade_exit(replace(t, lots=4 * LOT), 60.0, 9100.0, "PROFIT_BOOK", 24250); tick()
 check("partial booking: no post", len(SENT) == 4)
 at(2026, 11, 27, 12, 15); feed.mark(9000, 24255); snapshot(9100, t); tick()
+check("12:15 hourly: booked part of the open trade + open, model size",
+      "Day P&L: +₹9,050" in SENT[-1][1] and "Booked +₹4,550 · Open +₹4,500" in SENT[-1][1], SENT[-1])
 at(2026, 11, 27, 12, 50); t.lots = 8 * LOT; feed.trade_exit(t, 70.0, 13000.0, "SIGNAL_EXIT", 24260); tick()
-check("12:50 close posted with the whole trade's result per lot",
-      SENT[-1][0] == "12:50" and "TRADE CLOSED" in SENT[-1][1] and "+₹3,683 per lot" in SENT[-1][1], SENT[-1])
+check("12:50 close posted: whole trade's result at 3 lots (22100/6 × 3)",
+      SENT[-1][0] == "12:50" and "TRADE CLOSED" in SENT[-1][1] and "Trade result: +₹11,050 (3 lots)" in SENT[-1][1], SENT[-1])
 at(2026, 11, 27, 13, 15); snapshot(22100, None); tick()
 check("13:15 hourly skipped (25 min after the close post)", SENT[-1][0] == "12:50")
 for hh in (14, 15):
     at(2026, 11, 27, hh, 15); snapshot(22100, None); tick()
 at(2026, 11, 27, 15, 35); snapshot(22100, None, label="CLOSE"); tick()
 close = SENT[-1][1]
-check("15:35 day close with stats", "Day closed" in close and "Day P&L: +₹3,683 per lot" in close
-      and "Trades: 1 · ✅ 1 · ❌ 0" in close and "Nov so far: +₹3,683 per lot (1 day)" in close, close)
+check("15:35 day close with stats", "Day closed" in close and "Day P&L: +₹11,050" in close
+      and "Trades: 1 · ✅ 1 · ❌ 0" in close and "Nov so far: +₹11,050 (1 day)" in close, close)
 check("whole day = 9 posts, under the cap of 10", len(SENT) == 9, [s[0] for s in SENT])
 check("post times", [s[0] for s in SENT] == ["09:00", "09:15", "10:00", "11:15", "12:15", "12:50", "14:15", "15:15", "15:35"],
       [s[0] for s in SENT])
-check("owner's ₹ amounts never posted", not any(x in s for s in texts() for x in ("9,100", "13,000", "22,100")))
+check("owner's real ₹ amounts never posted", not any(x in s for s in texts() for x in ("9,100", "13,000", "22,100")))
+check("owner's real lot counts never posted", not any(x in s for s in texts() for x in ("6 lots", "12 lots", "4 lots")))
 check("no links", not any("http" in s or "www." in s for s in texts()))
 check("every post fits in 280", all(xp._weight(s) <= 280 for s in texts()), [xp._weight(s) for s in texts()])
 if VERBOSE:
@@ -156,7 +162,39 @@ check("never more than 10 posts", len(SENT) <= 10, len(SENT))
 check("every announced entry has its exit", n_entries == n_exits and n_entries >= 1, (n_entries, n_exits))
 check("day close still posted, last", "Day closed" in ts_[-1])
 check("close counts ALL 6 trades, even unannounced ones", "Trades: 6 · ✅ 3 · ❌ 3" in ts_[-1], ts_[-1])
+check("unknown grade → 2 lots; day = sum of trades (3×2600 − 3×1300)", "Day P&L: +₹3,900" in ts_[-1]
+      and "Best +₹2,600 · Worst −₹1,300" in ts_[-1], ts_[-1])
 check("busy day posts nothing beyond what fits", len(SENT) == 2 + 2 * n_entries + 1 + sum("⏱" in s for s in ts_))
+if VERBOSE:
+    print("\n" + "\n\n".join(f"[{a}]\n{b}" for a, b in SENT) + "\n")
+
+# ── 3b. model size ignores what the owner actually got filled ──────────────────
+print("model size, not the owner's fills")
+reset("model")
+at(2026, 12, 4, 8, 0); tick()
+at(2026, 12, 4, 10, 0); t = directional(2); feed.trade_entry(t, 24300, strength="STRONG"); tick()   # margin: 6 → 2 lots
+at(2026, 12, 4, 11, 0); feed.trade_exit(t, 80.0, 2600.0, "TARGET", 24200); tick()
+check("STRONG signal filled at only 2 lots: X still shows 3 lots", "Sold 3 lots 24500 CE" in SENT[0][1], SENT[0][1])
+check("…and the result scales to 3 lots (2600/2 × 3)", "Trade result: +₹3,900 (3 lots)" in SENT[1][1], SENT[1][1])
+at(2026, 12, 4, 14, 10); t = directional(1, action="PUT_SELL"); feed.trade_entry(t, 24300, strength="MODERATE"); tick()  # 14:00 half size
+at(2026, 12, 4, 14, 50); feed.trade_exit(t, 80.0, -650.0, "SL_HIT", 24200); tick()
+check("MODERATE signal cut to 1 lot by the 14:00 rule: X shows 2 lots", "Sold 2 lots 24500 PE" in SENT[2][1]
+      and "Stop: spot below" in SENT[2][1], SENT[2][1])
+check("…loss scales to 2 lots (−650/1 × 2)", "Trade result: −₹1,300 (2 lots)" in SENT[3][1], SENT[3][1])
+s_ = TradeState(action="STRANGLE", strike=24600, symbol="x", entry_time=CLOCK[0], entry_premium=80.0, entry_spot=24300,
+                sl_spot_level=24650, sl_put=23950, expiry="2026-12-08", lots=4 * LOT)
+reset("strangle")
+at(2026, 12, 4, 8, 0); tick()
+at(2026, 12, 4, 10, 0)
+feed.trade_entry(s_, 24300, strength="STRANGLE", strangle={"ce_strike": 24600, "ce_symbol": "C", "ce_price": 45.0,
+                                                          "pe_strike": 24000, "pe_symbol": "P", "pe_price": 35.0}); tick()
+at(2026, 12, 4, 11, 0); feed.trade_exit(replace(s_, action="STRANGLE_CE", strike=24600), 70.0, -6500.0, "SL_HIT", 24660); tick()
+at(2026, 12, 4, 15, 20); feed.trade_exit(replace(s_, action="STRANGLE_PE", strike=24000), 5.0, 7800.0, "EOD", 24640); tick()
+check("strangle: 2 lots each leg", "Sold 2 lots each: 24600 CE @ ₹45.00 + 24000 PE @ ₹35.00" in SENT[0][1], SENT[0][1])
+check("first leg's stop-out is not a separate post", len(SENT) == 2, [t[:40] for t in texts()])
+check("strangle result nets both legs at 2 lots ((−6500+7800)/4 × 2)", "Trade result: +₹650 (2 lots each leg)" in SENT[1][1]
+      and "Nifty strangle, last leg 24000 PE" in SENT[1][1], SENT[1][1])
+check("all posts fit in 280", all(xp._weight(x) <= 280 for x in texts()))
 if VERBOSE:
     print("\n" + "\n\n".join(f"[{a}]\n{b}" for a, b in SENT) + "\n")
 
@@ -170,7 +208,7 @@ for hh in (10, 11, 12, 13, 14, 15):
 at(2026, 12, 1, 15, 35); snapshot(0, None, label="CLOSE"); tick()
 check("no-trade day: greeting, scan, close — 3 posts", len(SENT) == 3, [s[0] for s in SENT])
 check("scan says no clear edge", "No clear edge yet" in SENT[1][1], SENT[1][1])
-check("close explains the day out", "No trade today" in SENT[2][1] and "Dec so far: +₹0 per lot (1 day)" in SENT[2][1], SENT[2][1])
+check("close explains the day out", "No trade today" in SENT[2][1] and "Dec so far: +₹0 (1 day)" in SENT[2][1], SENT[2][1])
 
 reset("holiday")
 at(2026, 12, 25, 9, 0); tick()
@@ -218,7 +256,7 @@ def flaky(text, c):
 tick(poster=flaky)
 check("429: nothing counted, cursor not advanced", len(SENT) == 1 and json.loads(xp.CURSOR.read_text())["seq"] == 1)
 tick(poster=flaky)
-check("retry posts once, result not double counted", len(SENT) == 2 and "+₹3,250 per lot" in SENT[1][1], SENT[-1])
+check("retry posts once, result not double counted", len(SENT) == 2 and "+₹6,500 (2 lots)" in SENT[1][1], SENT[-1])
 check("post counter = 2", json.loads(xp.CURSOR.read_text())["day"]["posts"] == 2)
 
 reset("month")
@@ -227,8 +265,8 @@ for d, pnl in ((7, 6500.0), (8, -1300.0)):
     at(2026, 12, d, 10, 0); t = directional(); feed.trade_entry(t, 24300); tick()
     at(2026, 12, d, 12, 0); feed.trade_exit(t, 50.0, pnl, "TARGET", 24200); tick()
     at(2026, 12, d, 15, 35); snapshot(pnl, None, label="CLOSE"); tick()
-# days are posted as +₹1,083 and −₹217 (whole rupees), so the month reads +₹866 — what a follower can add up
-check("month so far = the sum of the posted day totals", "Dec so far: +₹866 per lot (2 days)" in SENT[-1][1], SENT[-1][1])
+# 6500/6×2 = 2166.67 → posted +₹2,167; −1300/6×2 = −433.33 → posted −₹433; month = +₹1,734 (what a follower can add up)
+check("month so far = the sum of the posted day totals", "Dec so far: +₹1,734 (2 days)" in SENT[-1][1], SENT[-1][1])
 
 reset("dry")
 at(2026, 12, 9, 9, 0); xp.run_once({}, False, poster=fake_send, now=CLOCK[0])

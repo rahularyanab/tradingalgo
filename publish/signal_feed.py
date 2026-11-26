@@ -13,7 +13,8 @@ Rules this module keeps:
 
 Event schema (v1) — one JSON object per line:
   common:  v, id, seq, ts (ISO with offset), date, type, instrument, lot_size, position_id, structure
-  ENTRY:   legs[{leg, strike, symbol, side, price, lots}], hedge?, spot, sl_spot, sl_spot_put?, lots_open, entry_lots
+  ENTRY:   legs[{leg, strike, symbol, side, price, lots}], hedge?, spot, sl_spot, sl_spot_put?, lots_open, entry_lots,
+           strength (signal grade: STRONG / MODERATE / STRANGLE; None if unknown)
   ADD:     legs[...] (the slice added, at its fill-request price), lots_added, lots_open, blended_entry
   EXIT:    leg ("CE" | "PE" | "BOTH"), strike, exit_price, lots_closed, lots_open (after), position_closed,
            reason, pnl (₹, owner's, net of hedge), points (₹ per share = per unit of premium),
@@ -137,9 +138,11 @@ def _guard(fn):
 # ── public API (called from main.py) ─────────────────────────────────────────
 
 @_guard
-def trade_entry(trade, spot: float, strangle: Optional[dict] = None) -> Optional[dict]:
+def trade_entry(trade, spot: float, strangle: Optional[dict] = None, strength: Optional[str] = None) -> Optional[dict]:
     """A new position was opened. `trade` is the bot's TradeState. For a strangle pass
-    strangle={ce_strike, ce_symbol, ce_price, pe_strike, pe_symbol, pe_price}."""
+    strangle={ce_strike, ce_symbol, ce_price, pe_strike, pe_symbol, pe_price}. `strength` is the
+    signal's grade (STRONG / MODERATE / STRANGLE): public posts size trades by it, not by the lots
+    actually filled (which margin step-down and late-entry sizing can cut)."""
     st = _load_state()
     if st.get("position"):
         logger.warning(f"signal_feed: entry while position {st['position']['id']} still open — replacing it")
@@ -159,7 +162,7 @@ def trade_entry(trade, spot: float, strangle: Optional[dict] = None) -> Optional
     event = {
         "type": "ENTRY", "position_id": pos_id, "structure": trade.action, "legs": legs,
         "spot": _r(spot), "sl_spot": _r(trade.sl_spot_level), "lots_open": lots, "entry_lots": lots,
-        "expiry": trade.expiry,
+        "expiry": trade.expiry, "strength": strength,
     }
     if trade.action == "STRANGLE" and trade.sl_put:
         event["sl_spot_put"] = _r(trade.sl_put)
@@ -288,8 +291,8 @@ def pnl_snapshot(day_realised: float, open_trade, label: str = "HOURLY") -> Opti
         "unrealised": _r(unrealised, 0) if position_open else 0,
         "day_total": _r(day_realised + (unrealised or 0), 0) if (unrealised is not None or not position_open) else None,
         "mark_age_sec": int(age) if age is not None else None,
-        "day_per_start_lot": _r(st["day"]["per_start_lot"], 0),
-        "open_per_start_lot": _r(unrealised / start_lots, 0) if (unrealised is not None and start_lots) else None,
+        "day_per_start_lot": _r(st["day"]["per_start_lot"]),          # paise kept: the poster multiplies
+        "open_per_start_lot": _r(unrealised / start_lots) if (unrealised is not None and start_lots) else None,
         "trades_closed_today": st["day"]["trades_closed"],
         "position_open": position_open,
         "lots_open": _lots(open_trade.lots) if position_open else 0,

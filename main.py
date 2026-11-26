@@ -1292,7 +1292,7 @@ def _enter_strangle(kite, signal, qty: int, spot: float, oc, pyramid_disabled: b
         _feed.trade_entry(monitor.trade, spot, strangle={
             "ce_strike": signal.call_strike, "ce_symbol": signal.call_symbol, "ce_price": signal.call_premium,
             "pe_strike": signal.put_strike, "pe_symbol": signal.put_symbol, "pe_price": signal.put_premium,
-        })
+        }, strength="STRANGLE")
         _save_state()
         return True
 
@@ -2236,7 +2236,7 @@ def _handle_management_decision(decision, trade, spot, tl, rsi, opt, oc, df):
                         hedge_entry_premium=hedge_ltp,
                         pyramid_disabled=new_qty != want_qty,
                     ))
-                    _feed.trade_entry(monitor.trade, spot)
+                    _feed.trade_entry(monitor.trade, spot, strength=new_signal.strength)
                     _save_state()
                 else:
                     send_error_alert(f"Directional re-entry failed: {entry_err}")
@@ -2475,7 +2475,7 @@ def run_scan():
                             hedge_entry_premium=hedge_ltp,
                             pyramid_disabled=pyramid_disabled_flag or qty != want,
                         ))
-                        _feed.trade_entry(monitor.trade, spot)
+                        _feed.trade_entry(monitor.trade, spot, strength=final.strength)
                         if is_reentry:
                             _reentry_count[final.action] = _reentry_count.get(final.action, 0) + 1
                             logger.info(f"STRONG re-entry #{_reentry_count[final.action]} for {final.action}")

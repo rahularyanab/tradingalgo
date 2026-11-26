@@ -24,7 +24,13 @@ Safe by default:
   * First start (no cursor) begins at the END of the outbox — it never replays old trades.
   * Events from an earlier day are never posted (only tallied).
   * Hourly lines older than SNAPSHOT_MAX_AGE are skipped; late trade posts say "(delayed)".
-  * No links in posts (X charges far more for a post with a URL). Numbers are PER LOT only.
+  * No links in posts (X charges far more for a post with a URL).
+  * MODEL SIZE, not the owner's fills: every trade is shown at a fixed size by signal grade
+    (MODEL_LOTS: STRONG 3, MODERATE 2, STRANGLE 2 per leg). Its ₹ = the real trade's P&L per
+    starting lot × model lots, so margin step-downs, the 14:00 half-size rule and profit-lock
+    cuts never change what followers see; adds and bookings scale in proportion. Every ₹ figure
+    is rounded to whole rupees before it is added up, so a day = the sum of its trade posts and
+    a month = the sum of its days.
 
 Credentials come from X_ENV_FILE (default /opt/trading-algo/x.env, chmod 600), never from the
 trading bot's .env:
@@ -62,6 +68,8 @@ ENV_FILE = Path(os.environ.get("X_ENV_FILE", str(_paths.ROOT / "x.env")))
 HANDLE = os.environ.get("X_HANDLE", "@ThetaDeskIN")
 
 DAILY_CAP = 10
+MODEL_LOTS = {"STRONG": 3, "MODERATE": 2, "STRANGLE": 2}   # Rahul's choice 2026-11-26 (half his 6/4/4 config)
+MODEL_LOTS_DEFAULT = 2                                     # unknown grade (e.g. an entry logged without one)
 POLL_SEC = 15
 GREETING_FROM, GREETING_UNTIL = dtime(9, 0), dtime(9, 15)
 SCAN_FROM, SCAN_UNTIL = dtime(9, 15), dtime(9, 45)
@@ -149,10 +157,10 @@ def is_market_day(d: date, holidays: Optional[set] = None) -> bool:
 
 def greeting_text(d: date) -> str:
     return _fit(
-        f"☀️ Good morning, traders — {_day_label(d)}\n"
-        f"Our Nifty option-selling algo trades live from 10:00.\n"
-        f"Follow {HANDLE} to see every trade as it happens: entry, exit and P&L per lot.\n"
-        f"First market scan at 9:15.\n{HASHTAGS}")
+        f"☀️ Good morning — {_day_label(d)}\n"
+        f"Nifty option-selling algo, live from 10:00. Follow {HANDLE} for every entry, exit & P&L.\n"
+        f"Size: 3 lots strong · 2 moderate · 2/leg strangle\n"
+        f"First scan 9:15\n{HASHTAGS}")
 
 
 def scan_text(ev: dict) -> str:
@@ -170,61 +178,73 @@ def scan_text(ev: dict) -> str:
     return _fit("\n".join(lines))
 
 
+def model_lots(ev: dict) -> int:
+    return MODEL_LOTS.get(ev.get("strength") or "", MODEL_LOTS["STRANGLE"] if ev.get("structure") == "STRANGLE"
+                          else MODEL_LOTS_DEFAULT)
+
+
+def _lots_word(n: int) -> str:
+    return f"{n} lot{'s' if n != 1 else ''}"
+
+
 def entry_text(ev: dict, late: bool) -> str:
     legs = ev["legs"]
+    n = model_lots(ev)
     d = " (delayed)" if late else ""
+    grade = {"STRONG": "strong signal", "MODERATE": "moderate signal"}.get(ev.get("strength") or "", "")
     if ev["structure"] == "STRANGLE":
         head = f"🔴 NEW TRADE{d} — Nifty strangle"
-        what = " + ".join(f"{l['strike']} {l['leg']} @ {_px(l['price'])}" for l in legs)
+        what = f"{_lots_word(n)} each: " + " + ".join(f"{l['strike']} {l['leg']} @ {_px(l['price'])}" for l in legs)
         stop = f"spot above {_num(ev['sl_spot'])} / below {_num(ev.get('sl_spot_put'))}"
     else:
         l = legs[0]
-        head = f"🔴 NEW TRADE{d} — Nifty"
-        what = f"{l['strike']} {l['leg']} @ {_px(l['price'])}"
+        head = f"🔴 NEW TRADE{d} — Nifty" + (f", {grade}" if grade else "")
+        what = f"{_lots_word(n)} {l['strike']} {l['leg']} @ {_px(l['price'])}"
         stop = f"spot {'above' if l['leg'] == 'CE' else 'below'} {_num(ev['sl_spot'])}"
     lines = [head, f"Sold {what}", f"Spot {_num(ev['spot'])} · Stop: {stop}"]
     if ev.get("hedge"):
         h = ev["hedge"]
-        lines.append(f"Hedge: bought {h['strike']} {legs[0]['leg']} @ {_px(h['price'])}")
+        lines.append(f"Hedge: bought {_lots_word(n)} {h['strike']} {legs[0]['leg']} @ {_px(h['price'])}")
     lines += [f"{_ts(ev):%H:%M} IST", HASHTAGS]
     return _fit("\n".join(lines))
 
 
-def exit_text(ev: dict, result_per_lot: Optional[float], late: bool) -> str:
-    what = "Nifty strangle" if ev["leg"] == "BOTH" else f"Nifty {ev['strike']} {ev['leg']}"
-    icon = "✅" if (result_per_lot if result_per_lot is not None else ev.get("pnl") or 0) >= 0 else "❌"
+def exit_text(ev: dict, result_rs: Optional[int], lots: int, late: bool) -> str:
+    if ev.get("structure") == "STRANGLE":
+        what = "Nifty strangle" if ev["leg"] == "BOTH" else f"Nifty strangle, last leg {ev['strike']} {ev['leg']}"
+    else:
+        what = f"Nifty {ev['strike']} {ev['leg']}"
+    icon = "✅" if (result_rs if result_rs is not None else ev.get("pnl") or 0) >= 0 else "❌"
     lines = [f"{icon} TRADE CLOSED{' (delayed)' if late else ''} — {what} @ {_px(ev.get('exit_price'))}",
              _reason(ev["reason"]) + (f" · {_pts(ev['points'])}" if ev.get("points") is not None else "")]
-    if result_per_lot is not None:
-        lines.append(f"Trade result: {_rs(result_per_lot)} per lot")
+    if result_rs is not None:
+        lines.append(f"Trade result: {_rs(result_rs)} ({_lots_word(lots)}{' each leg' if ev.get('structure') == 'STRANGLE' else ''})")
     lines.append(f"{_ts(ev):%H:%M} IST")
     return _fit("\n".join(lines))
 
 
-def hourly_text(ev: dict) -> str:
-    booked = ev.get("day_per_start_lot") or 0
-    open_pl = ev.get("open_per_start_lot")
+def hourly_text(ev: dict, booked: int, open_rs: Optional[int]) -> str:
+    """booked / open_rs are model-size rupees, already rounded."""
     lines = [f"⏱ {_ts(ev):%H:%M} IST — Nifty algo"]
-    if ev.get("position_open") and open_pl is None:
-        lines.append(f"Booked {_rs(booked)} per lot · open P&L updating")
+    if ev.get("position_open") and open_rs is None:
+        lines.append(f"Booked {_rs(booked)} · open P&L updating")
     else:
-        lines.append(f"Day P&L: {_rs(booked + (open_pl or 0))} per lot")
+        lines.append(f"Day P&L: {_rs(booked + (open_rs or 0))}")
         if ev.get("position_open"):
-            lines.append(f"Booked {_rs(booked)} · Open {_rs(open_pl)}")
+            lines.append(f"Booked {_rs(booked)} · Open {_rs(open_rs)}")
     n = ev.get("trades_closed_today") or 0
     lines.append(f"{n} trade{'s' if n != 1 else ''} closed today" + (" · position open" if ev.get("position_open") else " · flat"))
     lines.append(HASHTAGS)
     return _fit("\n".join(lines))
 
 
-def close_text(ev: dict, trades: list, month_total: float, month_days: int) -> str:
+def close_text(ev: dict, trades: list, day_total: int, month_total: int, month_days: int) -> str:
     d = _ts(ev).date()
-    day_total = (ev.get("day_per_start_lot") or 0) + (ev.get("open_per_start_lot") or 0)
     lines = [f"🏁 Day closed — {_day_label(d)}"]
     if not trades and not ev.get("trades_closed_today"):
         lines.append("No trade today: the signals never lined up, so the algo stayed out.")
     else:
-        lines.append(f"Day P&L: {_rs(day_total)} per lot (1 lot = 65 qty)")
+        lines.append(f"Day P&L: {_rs(day_total)} (1 lot = 65 qty)")
         if trades:
             won = sum(1 for t in trades if t >= 0)
             lines.append(f"Trades: {len(trades)} · ✅ {won} · ❌ {len(trades) - won}")
@@ -232,7 +252,7 @@ def close_text(ev: dict, trades: list, month_total: float, month_days: int) -> s
                 lines.append(f"Best {_rs(max(trades))} · Worst {_rs(min(trades))}")
     if ev.get("position_open"):
         lines.append("⚠️ A position is still open")
-    lines.append(f"{d:%b} so far: {_rs(month_total)} per lot ({month_days} day{'s' if month_days != 1 else ''})")
+    lines.append(f"{d:%b} so far: {_rs(month_total)} ({month_days} day{'s' if month_days != 1 else ''})")
     lines.append(HASHTAGS)
     return _fit("\n".join(lines))
 
@@ -372,6 +392,20 @@ def _send(text: str, cur: dict, creds: dict, live: bool, poster, tag: str) -> bo
     return True
 
 
+def _model_day(ev: dict, cur: dict) -> tuple[int, Optional[int]]:
+    """Today's P&L at MODEL size, in whole ₹: (booked, open). booked = closed trades today + the
+    already-booked part of the open position; open = its unrealised (None if no fresh mark)."""
+    booked = sum(cur["day"]["trades"])
+    if not ev.get("position_open"):
+        return booked, 0
+    pos = cur.get("book", {}).get(ev.get("position_id") or "")
+    lots = (pos or {}).get("model_lots") or MODEL_LOTS_DEFAULT
+    if pos:
+        booked += round(pos["per_lot"] * lots)
+    open_pl = ev.get("open_per_start_lot")
+    return booked, (round(open_pl * lots) if open_pl is not None else None)
+
+
 # ── the decision for one event ───────────────────────────────────────────────
 
 def _handle(ev: dict, cur: dict, now: datetime, holidays: set, creds, live, poster) -> None:
@@ -385,7 +419,8 @@ def _handle(ev: dict, cur: dict, now: datetime, holidays: set, creds, live, post
     tag = f"seq {ev['seq']} {t}"
 
     if t == "ENTRY":
-        book[pid or "?"] = {"per_lot": 0.0, "start_lots": ev.get("entry_lots"), "announced": False}
+        book[pid or "?"] = {"per_lot": 0.0, "start_lots": ev.get("entry_lots"), "announced": False,
+                            "model_lots": model_lots(ev)}
         # room for this entry AND its later exit, on top of the reserve
         if today_event and _room(cur, extra_reserved=1):
             if _send(entry_text(ev, age > LATE_AFTER), cur, creds, live, poster, tag):
@@ -406,14 +441,15 @@ def _handle(ev: dict, cur: dict, now: datetime, holidays: set, creds, live, post
         if not ev.get("position_closed"):
             return                                           # partial booking / one strangle leg: no post
         result = pos["per_lot"] if pos is not None else per_lot
-        if today_event and result is not None:
-            day["trades"].append(round(result, 2))
+        lots = (pos or {}).get("model_lots") or MODEL_LOTS_DEFAULT
+        result_rs = round(result * lots) if result is not None else None     # whole ₹: what the post shows
+        if today_event and result_rs is not None:
+            day["trades"].append(result_rs)
         announced = bool(pos and pos.get("announced"))
         book.pop(pid, None)
         if today_event and announced:
             # this exit was reserved for: post it even when the cap is tight (only the hard cap stops it)
-            if not _send(exit_text(ev, result, age > LATE_AFTER), cur, creds, live, poster, tag):
-                pass
+            _send(exit_text(ev, result_rs, lots, age > LATE_AFTER), cur, creds, live, poster, tag)
             day["last_trade_post"] = ts.isoformat()
         return
 
@@ -431,12 +467,15 @@ def _handle(ev: dict, cur: dict, now: datetime, holidays: set, creds, live, post
             if day["closed"]:
                 return
             day["closed"] = True                              # frees its own reserved slot for _send
+            booked, open_rs = _model_day(ev, cur)
+            day_total = booked + (open_rs or 0)
             hist = cur.setdefault("history", {})
-            hist[ts.date().isoformat()] = (ev.get("day_per_start_lot") or 0) + (ev.get("open_per_start_lot") or 0)   # exact; rounded only on display
+            hist[ts.date().isoformat()] = day_total           # whole ₹, so the month = the sum of posted days
             month = ts.strftime("%Y-%m")
             month_days = [v for k, v in hist.items() if k.startswith(month)]
             try:
-                _send(close_text(ev, day["trades"], sum(month_days), len(month_days)), cur, creds, live, poster, tag)
+                _send(close_text(ev, day["trades"], day_total, sum(month_days), len(month_days)),
+                      cur, creds, live, poster, tag)
             except _Retry:
                 day["closed"] = False                         # retry later, history entry is idempotent
                 raise
@@ -450,7 +489,8 @@ def _handle(ev: dict, cur: dict, now: datetime, holidays: set, creds, live, post
         if last and (ts - datetime.fromisoformat(last)).total_seconds() < QUIET_AFTER_TRADE:
             return
         if _room(cur):
-            _send(hourly_text(ev), cur, creds, live, poster, tag)
+            booked, open_rs = _model_day(ev, cur)
+            _send(hourly_text(ev, booked, open_rs), cur, creds, live, poster, tag)
         else:
             logger.info(f"{tag}: hourly skipped to keep room under the daily cap")
         return
