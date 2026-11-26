@@ -26,7 +26,7 @@ Safe by default:
   * Hourly lines older than SNAPSHOT_MAX_AGE are skipped; late trade posts say "(delayed)".
   * No links in posts (X charges far more for a post with a URL).
   * MODEL SIZE, not the owner's fills: every trade is shown at a fixed size by signal grade
-    (STRONG 3, MODERATE 2, STRANGLE 2 per leg), so margin step-downs, the 14:00 half-size rule
+    (STRONG 3, MODERATE 2, STRANGLE 1 per leg), so margin step-downs, the 14:00 half-size rule
     and profit-lock cuts never change what followers see. Its ₹ come from publish/follow.py — the
     same whole-lot ledger the Telegram channel uses — i.e. what a follower really makes following
     the posts in whole lots. Every ₹ figure is rounded to whole rupees before it is added up, so a
@@ -69,7 +69,7 @@ ENV_FILE = Path(os.environ.get("X_ENV_FILE", str(_paths.ROOT / "x.env")))
 HANDLE = os.environ.get("X_HANDLE", "@ThetaDeskIN")
 
 DAILY_CAP = 10
-MODEL_LOTS = F.STANDARD                                    # STRONG 3 · MODERATE 2 · STRANGLE 2/leg (Rahul, 2026-11-26)
+MODEL_LOTS = F.STANDARD                                    # STRONG 3 · MODERATE 2 · STRANGLE 1/leg (Rahul, 2026-11-26)
 POLL_SEC = 15
 GREETING_FROM, GREETING_UNTIL = dtime(9, 0), dtime(9, 15)
 SCAN_FROM, SCAN_UNTIL = dtime(9, 15), dtime(9, 45)
@@ -159,7 +159,7 @@ def greeting_text(d: date) -> str:
     return _fit(
         f"☀️ Good morning — {_day_label(d)}\n"
         f"Nifty option-selling algo, live from 10:00. Follow {HANDLE} for every entry, exit & P&L.\n"
-        f"Size: 3 lots strong · 2 moderate · 2/leg strangle\n"
+        f"Size: 3 lots strong · 2 moderate · 1/leg strangle\n"
         f"First scan 9:15\n{HASHTAGS}")
 
 

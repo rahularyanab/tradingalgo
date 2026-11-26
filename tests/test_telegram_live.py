@@ -166,8 +166,24 @@ print("bot buttons")
 tg, pub = reset("bot")
 at(27, 8, 0); pub.run_once(CLOCK[0])
 txt, kb = T.reply_for("hello", "333", "Meera", {"channel": CH})
-check("anyone who messages is welcomed and offered sizes", "Welcome, Meera" in txt and "Pick your size" in txt
-      and kb["inline_keyboard"][1][0]["callback_data"] == "plan:small", txt)
+check("anyone who messages is welcomed and offered sizes, Small first", "Welcome, Meera" in txt and "Pick your size" in txt
+      and kb["inline_keyboard"][0][0]["callback_data"] == "plan:small"
+      and kb["inline_keyboard"][1][0]["callback_data"] == "plan:standard", txt)
+check("welcome: capital guidance, 1% aim, watch first, paid plan only when confident",
+      "₹2 lakh → Small · 1 lot" in txt and "₹1.05–1.1 lakh" in txt and "₹5 lakh → Standard · 3/2/1" in txt
+      and "about 1% of capital" in txt and "Follow the trades for a few weeks" in txt
+      and "paid plan only once you're confident" in txt, txt)
+J = TMP / "journal.csv"
+J.write_text("lots,net_pnl\n" + "".join(f"65,{p}\n" for p in [1500] * 18 + [-800, -2841, -1000]))
+T._stats_cache.clear()
+s = T.risk_stats(J)
+check("risk stats from the journal, per lot", s == {"trades": 21, "avg_loss": (-800 - 2841 - 1000) / 3, "worst": -2841, "over_2000": 1}, s)
+T._paths.JOURNAL_FILE = J; T._stats_cache.clear()
+txt2 = T.welcome_text("Meera", CH)
+check("welcome shows the real record next to the 1% aim", "over 21 trades" in txt2 and "₹1,547 per lot on average" in txt2
+      and "the worst cost ₹2,841" in txt2, txt2)
+J.write_text("lots,net_pnl\n65,-500\n"); T._stats_cache.clear()
+check("too few trades: no record line rather than a misleading one", "Our record" not in T.welcome_text("M", CH))
 check("…and starts on Standard with alerts on", T.load_subs()["333"]["plan"] == "standard" and T.load_subs()["333"]["alerts"])
 check("size button → Small", "Small · 1 lot" in T.on_callback("plan:small", "333") and T.load_subs()["333"]["plan"] == "small")
 txt, _ = T.reply_for("📍 Trade & SL", "333", "Meera", {})

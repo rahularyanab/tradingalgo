@@ -3,8 +3,9 @@ Follower sizing — ONE calculation shared by X and Telegram, so both always sho
 and those rupees are what a follower really makes by following the posts in whole lots.
 
 Size plans (lots by signal grade):
-    STANDARD  STRONG 3 · MODERATE 2 · STRANGLE 2 per leg   (X, the Telegram channel, "Standard" DMs)
-    SMALL     1 lot for every grade                         ("Small" DMs)
+    STANDARD  STRONG 3 · MODERATE 2 · STRANGLE 1 per leg   (X, the Telegram channel, "Standard" DMs;
+              Rahul 2026-11-26: for ~₹5 lakh trading capital — changed from 3/2/2)
+    SMALL     1 lot for every grade                         ("Small" DMs; for ~₹2 lakh capital)
 
 Whole lots: after every owner event (whatever lots the owner actually got filled), a follower's
 open lots on each leg become
@@ -23,7 +24,7 @@ from __future__ import annotations
 import math
 from typing import Optional
 
-STANDARD = {"STRONG": 3, "MODERATE": 2, "STRANGLE": 2}
+STANDARD = {"STRONG": 3, "MODERATE": 2, "STRANGLE": 1}
 SMALL = {"STRONG": 1, "MODERATE": 1, "STRANGLE": 1}
 PLANS = {"standard": STANDARD, "small": SMALL}
 LOT_SIZE = 65

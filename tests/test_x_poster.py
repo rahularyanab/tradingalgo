@@ -100,7 +100,7 @@ check("nothing before 9:00", SENT == [])
 at(2026, 11, 27, 9, 0); tick()
 at(2026, 11, 27, 9, 5); tick()
 check("9:00 greeting, once, explains the fixed sizes", len(SENT) == 1 and SENT[0][0] == "09:00" and "Follow @ThetaDeskIN" in SENT[0][1]
-      and "Size: 3 lots strong · 2 moderate · 2/leg strangle" in SENT[0][1] and SENT[0][1].endswith(xp.HASHTAGS), SENT)
+      and "Size: 3 lots strong · 2 moderate · 1/leg strangle" in SENT[0][1] and SENT[0][1].endswith(xp.HASHTAGS), SENT)
 at(2026, 11, 27, 9, 15); scan(); tick()
 at(2026, 11, 27, 9, 30); scan("STRANGLE"); tick()                # second pre-10:00 scan: not posted
 check("9:15 first scan, once", len(SENT) == 2 and "First scan 09:15" in SENT[1][1]
@@ -190,9 +190,9 @@ feed.trade_entry(s_, 24300, strength="STRANGLE", strangle={"ce_strike": 24600, "
                                                           "pe_strike": 24000, "pe_symbol": "P", "pe_price": 35.0}); tick()
 at(2026, 12, 4, 11, 0); feed.trade_exit(replace(s_, action="STRANGLE_CE", strike=24600), 70.0, -6500.0, "SL_HIT", 24660); tick()
 at(2026, 12, 4, 15, 20); feed.trade_exit(replace(s_, action="STRANGLE_PE", strike=24000), 5.0, 7800.0, "EOD", 24640); tick()
-check("strangle: 2 lots each leg", "Sold 2 lots each: 24600 CE @ ₹45.00 + 24000 PE @ ₹35.00" in SENT[0][1], SENT[0][1])
+check("strangle: 1 lot each leg (3/2/1)", "Sold 1 lot each: 24600 CE @ ₹45.00 + 24000 PE @ ₹35.00" in SENT[0][1], SENT[0][1])
 check("first leg's stop-out is not a separate post", len(SENT) == 2, [t[:40] for t in texts()])
-check("strangle result nets both legs at 2 lots ((−6500+7800)/4 × 2)", "Trade result: +₹650 (2 lots each leg)" in SENT[1][1]
+check("strangle result nets both legs at 1 lot ((−6500+7800)/4 × 1)", "Trade result: +₹325 (1 lot each leg)" in SENT[1][1]
       and "Nifty strangle, last leg 24000 PE" in SENT[1][1], SENT[1][1])
 check("all posts fit in 280", all(xp._weight(x) <= 280 for x in texts()))
 if VERBOSE:

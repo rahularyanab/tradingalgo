@@ -4,10 +4,10 @@ Telegram service: the public channel, personal DMs at each follower's size, and 
 Runs as its OWN process (systemd: telegram-live.service), never inside the trading bot:
     venv/bin/python -m publish.telegram_live
 
-Channel (the 3/2/2 "standard" plan, same rupees as X), real time:
+Channel (the 3/2/1 "standard" plan, same rupees as X), real time:
     first scan (09:15) · every entry, add, partial booking, exit · hourly P&L · day close
 Personal DMs (only to people who pressed Start in the bot, with alerts on), at their plan:
-    standard 3/2/2 or small 1 lot — entries, adds, bookings, exits as whole-lot instructions,
+    standard 3/2/1 or small 1 lot — entries, adds, bookings, exits as whole-lot instructions,
     and a day-close line with their own P&L.
 Bot buttons: Trade & SL · Margin · Charges · P&L · Lot size · Alerts.
 
@@ -51,7 +51,7 @@ OWNER_ENV: Path = _paths.ROOT / ".env"
 LOT_SIZE = 65
 POLL_SEC = 10
 SNAPSHOT_MAX_AGE = 20 * 60
-PLAN_LABEL = {"standard": "Standard · 3/2/2 lots", "small": "Small · 1 lot"}
+PLAN_LABEL = {"standard": "Standard · 3/2/1 lots", "small": "Small · 1 lot"}
 
 # Approximate Zerodha F&O option charges (rates as of 2025). Shown as an estimate, never as exact.
 CHARGES = {
@@ -287,7 +287,7 @@ def _open_rs(st: dict, ev: dict, plan_name: str) -> tuple[int, Optional[int]]:
 
 def hourly_msg(ev: dict, st: dict) -> str:
     booked = _plan_day(st, "standard")
-    lines = [f"⏱ <b>{X._ts(ev):%H:%M} IST</b> — Nifty algo (3/2/2 plan)"]
+    lines = [f"⏱ <b>{X._ts(ev):%H:%M} IST</b> — Nifty algo (3/2/1 plan)"]
     if ev.get("position_open"):
         part, open_rs = _open_rs(st, ev, "standard")
         booked += part
@@ -324,7 +324,7 @@ def close_msg(ev: dict, st: dict, plan_name: str = "standard", personal: bool = 
             lines.append(f"Best {X._rs(max(trades))} · Worst {X._rs(min(trades))}")
     lines.append(f"{d:%b} so far: {X._rs(month_total)} ({month_days} day{'s' if month_days != 1 else ''})")
     if not personal:
-        lines.append("Plan: 3 lots strong · 2 moderate · 2/leg strangle (1 lot = 65 qty)")
+        lines.append("Plan: 3 lots strong · 2 moderate · 1/leg strangle (1 lot = 65 qty)")
     return "\n".join(lines)
 
 
@@ -548,6 +548,63 @@ def charges_for(pos: dict, n: int, exit_prices: Optional[dict] = None) -> dict:
 
 # ── the bot (people who message it) ──────────────────────────────────────────
 
+_stats_cache: dict = {}
+
+
+def risk_stats(journal: Optional[Path] = None) -> Optional[dict]:
+    """Real per-lot loss figures from the owner's trade journal (cached 1 hour): what the welcome
+    message shows next to the "about 1%" aim, so the claim is never stated without the record."""
+    journal = journal or _paths.JOURNAL_FILE
+    hit = _stats_cache.get(str(journal))
+    if hit and time.time() - hit[0] < 3600:
+        return hit[1]
+    import csv
+    try:
+        rows = list(csv.DictReader(open(journal)))
+    except (FileNotFoundError, OSError):
+        return None
+    per_lot = []
+    for r in rows:
+        try:
+            lots = float(r["lots"]) / LOT_SIZE
+            if lots > 0:
+                per_lot.append(float(r["net_pnl"]) / lots)
+        except (KeyError, ValueError, ZeroDivisionError):
+            continue
+    losses = [p for p in per_lot if p < 0]
+    out = None
+    if len(per_lot) >= 20 and losses:
+        out = {"trades": len(per_lot), "avg_loss": sum(losses) / len(losses), "worst": min(losses),
+               "over_2000": sum(1 for p in losses if p < -2000)}
+    _stats_cache[str(journal)] = (time.time(), out)
+    return out
+
+
+def welcome_text(first_name: str, channel: str) -> str:
+    s = risk_stats()
+    record = ""
+    if s:
+        record = (f"Our record over {s['trades']} trades: a losing trade cost ₹{abs(s['avg_loss']):,.0f} per lot on "
+                  f"average; the worst cost ₹{abs(s['worst']):,.0f}.\n")
+    return (f"👋 Welcome{', ' + html.escape(first_name) if first_name else ''}!\n\n"
+            f"I send you every trade of our Nifty option-selling algo the moment it happens — entries, adds, "
+            f"bookings and exits — sized for you, with your P&L.\n"
+            + (f"The public feed is {channel}.\n" if channel else "")
+            + "\n<b>Pick your size by your trading capital</b>\n"
+              "• <b>₹2 lakh → Small · 1 lot</b> on every trade.\n"
+              "  A 1-lot trade needs only about ₹1.05–1.1 lakh of margin, but we recommend joining only with "
+              "₹2 lakh: preserving capital comes first.\n"
+              "• <b>₹5 lakh → Standard · 3/2/1</b>: 3 lots on strong signals, 2 on moderate, 1 per leg on strangles.\n"
+              "  It can be placed with about ₹3.2–3.3 lakh, but we recommend ₹5 lakh for the same reason.\n\n"
+              "We aim to risk about 1% of capital on a trade (≈ ₹2,000 per lot).\n"
+            + record
+            + "\n👀 <b>Start by watching.</b> Follow the trades for a few weeks before you put money in, and take "
+              "the paid plan only once you're confident.\n\n"
+              "Use the buttons below any time for the open trade, margin, charges and P&L.\n\n"
+              "<i>Not investment advice. Past results don't guarantee future ones. Trade only what you can "
+              "afford to lose.</i>")
+
+
 def _current(st: dict) -> tuple[Optional[dict], bool]:
     """(position, is_open): the open position, else the latest entry (for margin/charges)."""
     positions = st.get("positions") or {}
@@ -561,8 +618,8 @@ def _keyboard() -> dict:
 
 
 def _size_buttons() -> dict:
-    return {"inline_keyboard": [[{"text": "Standard · 3/2/2 lots", "callback_data": "plan:standard"}],
-                                [{"text": "Small · 1 lot", "callback_data": "plan:small"}]]}
+    return {"inline_keyboard": [[{"text": "Small · 1 lot  (₹2 lakh capital)", "callback_data": "plan:small"}],
+                                [{"text": "Standard · 3/2/1  (₹5 lakh capital)", "callback_data": "plan:standard"}]]}
 
 
 def reply_for(text: str, chat_id: str, first_name: str, settings: dict) -> tuple[str, Optional[dict]]:
@@ -578,14 +635,7 @@ def reply_for(text: str, chat_id: str, first_name: str, settings: dict) -> tuple
             subs[chat_id] = {"plan": "standard", "alerts": True, "name": first_name[:40],
                              "joined": X.now_ist().isoformat(timespec="seconds")}
             save_subs(subs)
-        return ((f"👋 Welcome{', ' + html.escape(first_name) if first_name else ''}!\n\n"
-                 f"I send you every trade of our Nifty option-selling algo, sized for you, the moment it happens: "
-                 f"entries, adds, bookings, exits and your P&L.\n\n"
-                 + (f"The public feed is {channel}.\n\n" if channel else "")
-                 + "<b>Pick your size:</b>\n• Standard — 3 lots on strong signals, 2 on moderate, 2 per leg on strangles\n"
-                   "• Small — 1 lot on every trade\n\nUse the buttons below any time for the open trade, margin, charges and P&L.\n\n"
-                   "<i>Not investment advice. Trade only what you can afford to lose.</i>"),
-                _size_buttons())
+        return (welcome_text(first_name, channel), _size_buttons())
 
     plan = sub.get("plan", "standard")
 
