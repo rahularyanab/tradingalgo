@@ -69,8 +69,6 @@ ENV_FILE = Path(os.environ.get("X_ENV_FILE", str(_paths.ROOT / "x.env")))
 HANDLE = os.environ.get("X_HANDLE", "@ThetaDeskIN")
 
 DAILY_CAP = 10
-DELAY_MIN = 15             # X runs this many minutes behind the trades (live alerts are paid, in the bot).
-                           # Overridden by X_DELAY_MIN in x.env; 0 = real time. The 9:00 greeting is never delayed.
 MODEL_LOTS = F.STANDARD                                    # STRONG 3 · MODERATE 2 · STRANGLE 1/leg (Rahul, 2026-11-26)
 POLL_SEC = 15
 GREETING_FROM, GREETING_UNTIL = dtime(9, 0), dtime(9, 15)
@@ -159,11 +157,6 @@ def is_market_day(d: date, holidays: Optional[set] = None) -> bool:
 
 # ── post texts ───────────────────────────────────────────────────────────────
 
-def _when(ev: dict) -> str:
-    """The trade's own time; says so when X is running behind."""
-    return f"{_ts(ev):%H:%M} IST" + (f" · posted {DELAY_MIN} min late" if DELAY_MIN else "")
-
-
 def greeting_text(d: date) -> str:
     return _fit(
         f"☀️ Good morning — {_day_label(d)}\n"
@@ -214,7 +207,7 @@ def entry_text(ev: dict, late: bool) -> str:
     if ev.get("hedge"):
         h = ev["hedge"]
         lines.append(f"Hedge: bought {_lots_word(n)} {h['strike']} {legs[0]['leg']} @ {_px(h['price'])}")
-    lines += [_when(ev), HASHTAGS]
+    lines += [f"{_ts(ev):%H:%M} IST", HASHTAGS]
     return _fit("\n".join(lines))
 
 
@@ -228,7 +221,7 @@ def exit_text(ev: dict, result_rs: Optional[int], lots: int, late: bool) -> str:
              _reason(ev["reason"]) + (f" · {_pts(ev['points'])}" if ev.get("points") is not None else "")]
     if result_rs is not None:
         lines.append(f"Trade result: {_rs(result_rs)} ({_lots_word(lots)}{' each leg' if ev.get('structure') == 'STRANGLE' else ''})")
-    lines.append(_when(ev))
+    lines.append(f"{_ts(ev):%H:%M} IST")
     return _fit("\n".join(lines))
 
 
@@ -319,11 +312,6 @@ def load_env() -> tuple[dict, bool]:
     creds = {"api_key": get("X_API_KEY"), "api_secret": get("X_API_SECRET"),
              "access_token": get("X_ACCESS_TOKEN"), "access_secret": get("X_ACCESS_SECRET")}
     live = get("X_LIVE") == "1" and all(creds.values())
-    global DELAY_MIN
-    try:
-        DELAY_MIN = max(0, int(get("X_DELAY_MIN") or 15))
-    except ValueError:
-        DELAY_MIN = 15
     return creds, live
 
 
@@ -429,7 +417,7 @@ def _handle(ev: dict, cur: dict, now: datetime, holidays: set, creds, live, post
     pid = ev.get("position_id")
     ts = _ts(ev)
     today_event = ts.date() == now.date() and is_market_day(now.date(), holidays)
-    age = (now - ts).total_seconds() - DELAY_MIN * 60      # lateness beyond the planned delay
+    age = (now - ts).total_seconds()
     tag = f"seq {ev['seq']} {t}"
 
     if t == "ENTRY":
@@ -473,7 +461,7 @@ def _handle(ev: dict, cur: dict, now: datetime, holidays: set, creds, live, post
 
     if t == "SCAN":
         if (today_event and not day["scanned"] and SCAN_FROM <= ts.time() < SCAN_UNTIL
-                and age < 15 * 60 and _room(cur)):
+                and now.time() < SCAN_UNTIL and _room(cur)):
             _send(scan_text(ev), cur, creds, live, poster, tag)
             day["scanned"] = True
         return
@@ -537,8 +525,6 @@ def run_once(creds: dict, live: bool, poster=post_to_x, now: Optional[datetime] 
         for ev in sorted(events, key=lambda e: e.get("seq", 0)):
             if ev.get("seq", 0) <= cur["seq"]:
                 continue
-            if _ts(ev) + timedelta(minutes=DELAY_MIN) > now:
-                break                                        # not due yet; later events wait behind it (order kept)
             snapshot = json.dumps(cur)                       # undo point if this event must be retried
             try:
                 _handle(ev, cur, now, holidays, creds, live, poster)

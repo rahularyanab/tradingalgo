@@ -22,7 +22,6 @@ IST = xp.IST
 PASS, FAIL = [], []
 CLOCK = [datetime(2026, 11, 27, 8, 0, tzinfo=IST)]
 feed._now = lambda: CLOCK[0]                     # feed events are stamped with the simulated clock
-xp.DELAY_MIN = 0                                 # sections 1–7 test the plan in real time; section 8 tests the delay
 xp.HOLIDAYS_FILE = TMP / "holidays.txt"
 xp.HOLIDAYS_FILE.write_text("2026-12-25  # Christmas\n")
 
@@ -279,36 +278,6 @@ at(2026, 12, 9, 9, 0); xp.run_once({}, False, poster=fake_send, now=CLOCK[0])
 check("dry run: nothing sent, text in the log, counted toward the cap",
       SENT == [] and "Good morning" in xp.DRYRUN_LOG.read_text()
       and json.loads(xp.CURSOR.read_text())["day"]["posts"] == 1)
-
-# ── 7b. X runs 15 minutes behind ─────────────────────────────────────────────
-print("X 15 minutes late")
-xp.DELAY_MIN = 15
-reset("delay")
-at(2026, 12, 10, 8, 50); tick()
-at(2026, 12, 10, 9, 0); tick()
-check("09:00 greeting is NOT delayed", len(SENT) == 1 and "Good morning" in SENT[0][1])
-at(2026, 12, 10, 9, 15); scan(); tick()
-check("09:15 scan held", len(SENT) == 1)
-at(2026, 12, 10, 9, 30); tick()
-check("09:30 scan posted, titled with its real time", len(SENT) == 2 and "First scan 09:15" in SENT[1][1])
-at(2026, 12, 10, 10, 0); t = directional(); feed.trade_entry(t, 24300, strength="STRONG"); tick()
-at(2026, 12, 10, 10, 5); feed.trade_exit(t, 70.0, 11700.0, "TARGET", 24200); tick()
-check("10:05: neither entry nor exit out yet", len(SENT) == 2)
-at(2026, 12, 10, 10, 15); tick()
-check("10:15: entry out, real time + 'posted 15 min late', not marked '(delayed)'", len(SENT) == 3
-      and "10:00 IST · posted 15 min late" in SENT[2][1] and "(delayed)" not in SENT[2][1], SENT[-1])
-at(2026, 12, 10, 10, 20); tick()
-check("10:20: exit follows in order", len(SENT) == 4 and "TRADE CLOSED" in SENT[3][1]
-      and "10:05 IST · posted 15 min late" in SENT[3][1], SENT[-1])
-at(2026, 12, 10, 11, 30); feed.pnl_snapshot(11700.0, None); tick()
-at(2026, 12, 10, 11, 45); tick()
-check("hourly line still posts 15 min later (not treated as stale)", "⏱ 11:30 IST" in SENT[-1][1], SENT[-1])
-at(2026, 12, 10, 15, 35); feed.pnl_snapshot(11700.0, None, label="CLOSE"); tick()
-check("15:35 close held", "Day closed" not in SENT[-1][1])
-at(2026, 12, 10, 15, 50); tick()
-check("15:50 close posted", "Day closed" in SENT[-1][1])
-check("all within 280", all(xp._weight(x) <= 280 for x in texts()))
-xp.DELAY_MIN = 0
 
 # ── 7. credentials ────────────────────────────────────────────────────────────
 print("credentials")

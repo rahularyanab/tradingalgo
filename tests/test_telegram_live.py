@@ -27,7 +27,6 @@ PASS, FAIL = [], []
 CLOCK = [datetime(2026, 11, 27, 8, 0, tzinfo=IST)]
 feed._now = lambda: CLOCK[0]
 X.now_ist = lambda: CLOCK[0]                     # the bot's access clock follows the simulated clock too
-X.DELAY_MIN = 0                                  # X's own 15-min delay is tested in test_x_poster.py
 X.HOLIDAYS_FILE = TMP / "holidays.txt"
 X.HOLIDAYS_FILE.write_text("2026-12-25\n")
 CH = "@ThetaDeskLive"
