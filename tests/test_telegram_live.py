@@ -192,6 +192,13 @@ T._paths.JOURNAL_FILE = J; T._stats_cache.clear()
 txt2 = T.welcome_text("Meera", CH)
 check("welcome shows the real record next to the 1% aim", "over 21 trades" in txt2 and "₹1,547 per lot on average" in txt2
       and "the worst cost ₹2,841" in txt2, txt2)
+check("no track-record line before the page is published", "Every trade, wins and losses" not in txt2)
+real_logs = T._paths.LOGS_DIR
+T._paths.LOGS_DIR = TMP
+(TMP / "telegraph.json").write_text(json.dumps({"url": "https://telegra.ph/Theta-Desk--live-track-record-11-26"}))
+check("published: welcome links the track record", "📊 Every trade, wins and losses: https://telegra.ph/Theta-Desk--live-track-record-11-26"
+      in T.welcome_text("Meera", CH))
+T._paths.LOGS_DIR = real_logs
 J.write_text("lots,net_pnl\n65,-500\n"); T._stats_cache.clear()
 check("too few trades: no record line rather than a misleading one", "Our record" not in T.welcome_text("M", CH))
 check("…and starts on Standard with alerts on", T.load_subs()["333"]["plan"] == "standard" and T.load_subs()["333"]["alerts"])

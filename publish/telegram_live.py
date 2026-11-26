@@ -642,6 +642,14 @@ def risk_stats(journal: Optional[Path] = None) -> Optional[dict]:
     return out
 
 
+def record_url() -> str:
+    """The public track-record page (publish/track_record.py), once it has been published."""
+    try:
+        return json.loads((_paths.LOGS_DIR / "telegraph.json").read_text()).get("url", "")
+    except (FileNotFoundError, ValueError):
+        return ""
+
+
 def welcome_text(first_name: str, channel: str) -> str:
     s = risk_stats()
     record = ""
@@ -660,6 +668,7 @@ def welcome_text(first_name: str, channel: str) -> str:
               "  It can be placed with about ₹3.2–3.3 lakh, but we recommend ₹5 lakh for the same reason.\n\n"
               "We aim to risk about 1% of capital on a trade (≈ ₹2,000 per lot).\n"
             + record
+            + (f"📊 Every trade, wins and losses: {record_url()}\n" if record_url() else "")
             + "\n👀 <b>Start by watching.</b> Follow the trades for a few weeks before you put money in, and take "
               "the paid plan only once you're confident.\n\n"
               "Use the buttons below any time for the open trade, margin, charges and P&L.\n\n"
