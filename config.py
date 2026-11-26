@@ -60,6 +60,12 @@ HEDGE_PRICE_MAX    = 8.0          # maximum LTP for hedge option
 HEDGE_PRICE_TARGET = 5.5          # ideal LTP ~₹5-6
 TRADEABLE_LTP_MIN  = 30.0         # preferred minimum premium when picking the strike to sell
 MIN_SELL_LTP       = 10.0         # never sell an option cheaper than this
+# Premium band for the option to SELL (0 = off: the Nifty bot sells the first strike beyond the S/R level, as always).
+# When set (Bank Nifty / Sensex profiles), the bot still starts at that level-based strike but walks further out of the
+# money, ignoring MAX_OTM_STRIKES, to the first strike whose premium is at or below SELL_PREMIUM_MAX. It never sells
+# closer to spot than the level-based strike.
+SELL_PREMIUM_MIN   = 0.0
+SELL_PREMIUM_MAX   = 0.0
 
 # ── Risk / SL settings ───────────────────────────────────────────
 SL_BUFFER_POINTS   = 50           # spot points beyond trendline = SL

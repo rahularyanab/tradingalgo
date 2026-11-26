@@ -37,6 +37,10 @@ max_daily_loss = 5000
 experience = "new"
 preferred_lots = 3
 allow_above_suggestion = true
+[overrides]
+SELL_PREMIUM_MIN = 400
+SELL_PREMIUM_MAX = 500
+CHAIN_HALF_WIDTH_PTS = 5000
 """
 
 
@@ -86,7 +90,7 @@ def child(index: str):
             return spot
         i = by_sym[key]
         d = (i["strike"] - spot) if i["instrument_type"] == "CE" else (spot - i["strike"])
-        return round(max(0.5, 600 * 0.999 ** max(d, 0) + max(-d, 0)), 2)    # smooth premium curve: OTM decays, ITM adds intrinsic
+        return round(max(0.5, 1500 * 0.999 ** max(d, 0) + max(-d, 0)), 2)    # smooth premium curve: OTM decays, ITM adds intrinsic
 
     calls = {"instruments": [], "order_api": 0, "ltp_keys": set()}
 
@@ -148,6 +152,15 @@ def child(index: str):
         real = {i["tradingsymbol"] for i in insts}
         out["sell_symbols_ok"] = bool(sig.call_symbol in real and sig.put_symbol in real)
         out["sold_ltps"] = (sig.call_ltp, sig.put_ltp)
+        out["sold_strikes"] = (sig.best_call_strike, sig.best_put_strike, spot + 4 * step, spot - 4 * step)
+        import strategy.option_signal as osig
+        # a level already far out (premium below the band): sell AT the level, never closer to spot
+        far = osig._select_call_strike(oc, spot + 15 * step)
+        out["far_level_pick"] = (far, spot + 15 * step)
+        # band switched off: the original nearest-strike rule
+        osig.SELL_PREMIUM_MAX = 0.0
+        out["band_off_pick"] = osig._select_call_strike(oc, spot + 4 * step)
+        osig.SELL_PREMIUM_MAX = config.SELL_PREMIUM_MAX
         out["hedges"] = (sig.hedge_call_ltp, sig.hedge_put_ltp)
 
     # orders: through the bot's own order helpers, into the paper ledger
@@ -206,6 +219,7 @@ def main():
     check("every index-dependent config default equals the NIFTY table (no profile = Nifty, as before)", not diff, str(diff))
     check("owner defaults: lots 6/4/4, NFO, lot 65", (config.LOTS_STRONG, config.LOTS_MODERATE, config.LOTS_STRANGLE, config.NFO_EXCHANGE, config.NIFTY_LOT_SIZE) == (6, 4, 4, "NFO", 65))
     check("owner instance is never paper", config.BROKER_PAPER is False and config.SETTINGS is None)
+    check("owner premium band is OFF (Nifty strike choice unchanged)", config.SELL_PREMIUM_MAX == 0 and config.SELL_PREMIUM_MIN == 0)
 
     print("\n[2] profile rules")
     live_bn = PROFILE.format(index="BANKNIFTY").replace("paper = true\n", "")
@@ -251,8 +265,15 @@ def main():
                   r["chain_steps"] == [x["step"]] and r["chain_symbol"].startswith(idx) and r["chain_expiry"] == r["exp1"], str(r))
             check(f"{idx}: instruments loaded from {x['exch']}", set(r["instruments_exchange"]) == {x["exch"]}, str(r["instruments_exchange"]))
             check(f"{idx}: chain covers the scaled width", r["chain_span"] >= 3000, str(r["chain_span"]))
-            check(f"{idx}: strike picker returns real {x['exch']} symbols at a premium >= the scaled minimum",
-                  r["sell_symbols_ok"] and all(p and p >= 25 for p in r["sold_ltps"]), str((r["sell_symbols_ok"], r["sold_ltps"], r["hedges"])))
+            check(f"{idx}: strike picker returns real {x['exch']} symbols", r["sell_symbols_ok"], str(r["sell_symbols_ok"]))
+            check(f"{idx}: both sold premiums in the ₹400-500 band", all(p and 400 <= p <= 500 for p in r["sold_ltps"]), str(r["sold_ltps"]))
+            c, p_, lvl_c, lvl_p = r["sold_strikes"]
+            check(f"{idx}: band strikes are beyond the S/R level (never closer to spot)", c >= lvl_c and p_ <= lvl_p, str(r["sold_strikes"]))
+            (fs, fp), lvl = r["far_level_pick"]
+            check(f"{idx}: a far level whose premium is already below the band is sold at the level itself",
+                  fs is not None and fs >= lvl and fs - lvl < x["step"] and fp < 400, str(r["far_level_pick"]))
+            check(f"{idx}: with the band off it sells the nearest strike beyond the level (old rule, premium > ₹500 here)",
+                  r["band_off_pick"][0] == lvl_c and r["band_off_pick"][1] > 500 and c > lvl_c, str((r["band_off_pick"], r["sold_strikes"])))
         check(f"{idx}: SELL then BUY through the bot's order helpers fill in the paper ledger",
               r["sell_ok"] and r["net_qty"] == -3 * x["lot"] and r["buy_ok"] and r["flat_after"] == [0] and r["orders_complete"] == ["COMPLETE", "COMPLETE"], str(r))
         check(f"{idx}: positions carry the {x['exch']} exchange", r["pos_exchange"] == x["exch"])

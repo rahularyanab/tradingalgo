@@ -28,6 +28,8 @@ from config import (
     MAX_OTM_STRIKES,
     TRADEABLE_LTP_MIN,
     MIN_SELL_LTP,
+    SELL_PREMIUM_MIN,
+    SELL_PREMIUM_MAX,
 )
 from data.option_chain import OptionChainData, StrikeData
 
@@ -125,6 +127,23 @@ def _build_nfo_symbol(strike: int, option_type: str, expiry_str: str) -> str:
             return f"{UNDERLYING}{strike}{option_type}"
 
 
+def _premium_band_pick(side: str, outward: list, anchor) -> tuple[Optional[int], Optional[float]]:
+    """
+    `outward`: StrikeData at or beyond the level-based anchor strike, nearest-to-spot first. Returns the first one whose
+    premium is <= SELL_PREMIUM_MAX (and still >= TRADEABLE_LTP_MIN), or (None, None) when the chain does not reach that far.
+    """
+    for s in outward:
+        if s.ltp and s.ltp <= SELL_PREMIUM_MAX:
+            if s.ltp < TRADEABLE_LTP_MIN:
+                break
+            tag = "" if s.ltp >= SELL_PREMIUM_MIN else f"  (below the ₹{SELL_PREMIUM_MIN:.0f} band: the level-based strike is already cheap)"
+            logger.info(f"{side} SELL strike: {s.strike} {'CE' if side == 'CALL' else 'PE'} @ ₹{s.ltp}  "
+                        f"(premium band ₹{SELL_PREMIUM_MIN:.0f}-{SELL_PREMIUM_MAX:.0f}, level anchor {anchor}){tag}")
+            return s.strike, s.ltp
+    logger.warning(f"{side} SELL: no strike at or beyond {anchor} with premium <= ₹{SELL_PREMIUM_MAX:.0f} in the option chain")
+    return None, None
+
+
 def _select_put_strike(
     oc: OptionChainData,
     trendline_support: Optional[float] = None,
@@ -144,6 +163,10 @@ def _select_put_strike(
         max_strike = min(max_strike, int(spot) - STRIKE_STEP)   # must still be OTM
     else:
         max_strike = int(spot) - STRIKE_STEP
+
+    if SELL_PREMIUM_MAX > 0:
+        outward = sorted([s for s in oc.put_data.values() if s.strike <= max_strike], key=lambda s: s.strike, reverse=True)
+        return _premium_band_pick("PUT", outward, max_strike)
 
     candidates = sorted(
         [
@@ -206,6 +229,10 @@ def _select_call_strike(
         min_strike = max(min_strike, int(spot) + STRIKE_STEP)   # must still be OTM
     else:
         min_strike = int(spot) + STRIKE_STEP
+
+    if SELL_PREMIUM_MAX > 0:
+        outward = sorted([s for s in oc.call_data.values() if s.strike >= min_strike], key=lambda s: s.strike)
+        return _premium_band_pick("CALL", outward, min_strike)
 
     candidates = sorted(
         [
