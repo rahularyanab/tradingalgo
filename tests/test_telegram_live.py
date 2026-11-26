@@ -26,6 +26,7 @@ IST = X.IST
 PASS, FAIL = [], []
 CLOCK = [datetime(2026, 11, 27, 8, 0, tzinfo=IST)]
 feed._now = lambda: CLOCK[0]
+X.now_ist = lambda: CLOCK[0]                     # the bot's access clock follows the simulated clock too
 X.HOLIDAYS_FILE = TMP / "holidays.txt"
 X.HOLIDAYS_FILE.write_text("2026-12-25\n")
 CH = "@ThetaDeskLive"
@@ -54,13 +55,16 @@ class FakeTG(T.TG):
         return {"ok": True, "result": {}}
 
 
-def reset(tag, live=True):
+OWNER = "900"
+
+
+def reset(tag, live=True, delay=0):
     feed.OUTBOX = T.OUTBOX = TMP / f"{tag}_outbox.jsonl"
     feed.STATE = TMP / f"{tag}_feed.json"
     T.STATE, T.SUBS, T.DRYRUN_LOG = TMP / f"{tag}_tg.json", TMP / f"{tag}_subs.json", TMP / f"{tag}_dry.log"
     feed._mark = None
     tg = FakeTG()
-    return tg, T.Publisher(tg, {"channel": CH, "live": live, "token": "TEST"})
+    return tg, T.Publisher(tg, {"channel": CH, "live": live, "token": "TEST", "delay_min": delay, "owner_id": OWNER})
 
 
 def at(d, hh, mm):
@@ -243,9 +247,10 @@ subscribe("444", "small"); subscribe("555", "small")
 tg.fail_next = {CH: [429], "555": [403]}
 at(27, 10, 0); feed.trade_entry(call_sell(2), 25900, strength="MODERATE")
 pub.run_once(CLOCK[0])
-check("channel 429: event held, no DM sent yet", not msgs(tg, "444") and json.loads(T.STATE.read_text())["seq"] == 0)
+check("channel 429: DM still goes out at once, channel post stays queued",
+      len(msgs(tg, "444")) == 1 and not msgs(tg, CH) and len(json.loads(T.STATE.read_text())["channel_queue"]) == 1)
 pub.run_once(CLOCK[0])
-check("retried: channel once, DM once", len(msgs(tg, CH)) == 1 and len(msgs(tg, "444")) == 1)
+check("retried: channel once, DM not repeated", len(msgs(tg, CH)) == 1 and len(msgs(tg, "444")) == 1)
 check("user who blocked the bot (403) is switched off", T.load_subs()["555"].get("blocked") is True)
 check("safe_html escapes P&L but keeps tags and entities",
       T.safe_html("<b>P&L</b> &amp; &lt;") == "<b>P&amp;L</b> &amp; &lt;")
@@ -267,6 +272,111 @@ tg, pub = reset("first")
 at(27, 10, 0); feed.trade_entry(call_sell(2), 25900)
 pub.run_once(CLOCK[0])
 check("first start replays nothing", tg.sent == [] and json.loads(T.STATE.read_text())["seq"] == 1)
+
+# ── 6. access: free month, then paid ─────────────────────────────────────────
+print("access rules")
+from publish import access as A
+now = datetime(2026, 12, 1, 10, 0, tzinfo=IST)
+sub = {"joined": now.isoformat()}
+A.ensure_trial(sub, now)
+check("trial = 30 days from joining", A.access_until(sub) == datetime(2026, 12, 31, 10, 0, tzinfo=IST)
+      and A.status(sub, now) == "trial" and A.days_left(sub, now) == 30)
+later = datetime(2026, 12, 31, 10, 0, tzinfo=IST)
+check("expired at the end", A.status(sub, later) == "expired" and A.days_left(sub, later) == 0)
+check("owner never expires", A.status(sub, datetime(2030, 1, 1, tzinfo=IST), is_owner=True) == "owner")
+A.add_paid(sub, datetime(2026, 12, 20, tzinfo=IST), 1, 999, "owner")
+check("paying during the trial adds a month after the trial end", A.access_until(sub) == datetime(2027, 1, 30, 10, 0, tzinfo=IST)
+      and A.status(sub, datetime(2027, 1, 5, tzinfo=IST)) == "paid", A.access_until(sub))
+A.add_paid(sub, datetime(2027, 3, 1, tzinfo=IST), 2, 1998, "owner")
+check("paying after expiry starts from the payment day", A.access_until(sub) == datetime(2027, 4, 30, tzinfo=IST))
+check("payments recorded", [p["amount"] for p in sub["payments"]] == [999, 1998])
+A.revoke(sub, datetime(2027, 3, 5, tzinfo=IST))
+check("revoke ends access now", A.status(sub, datetime(2027, 3, 5, 0, 1, tzinfo=IST)) == "expired")
+subs_ = {"1": {"name": "Asha", "username": "asha_k"}, "2": {"name": "Ashok"}, "3": {"name": "Ravi"}}
+check("find: id, @username, name prefix, ambiguity",
+      A.find(subs_, "3") == ["3"] and A.find(subs_, "@asha_k") == ["1"] and A.find(subs_, "rav") == ["3"]
+      and sorted(A.find(subs_, "ash")) == ["1", "2"] and A.find(subs_, "zz") == [])
+n = {"joined": datetime(2026, 12, 1, 10, 0, tzinfo=IST).isoformat()}
+A.ensure_trial(n, now)
+seq = [(datetime(2026, 12, 25, 10, 0, tzinfo=IST), None), (datetime(2026, 12, 26, 11, 0, tzinfo=IST), 5),
+       (datetime(2026, 12, 26, 15, 0, tzinfo=IST), None), (datetime(2026, 12, 30, 23, 0, tzinfo=IST), None),
+       (datetime(2026, 12, 31, 9, 30, tzinfo=IST), 1), (datetime(2026, 12, 31, 12, 0, tzinfo=IST), 0),
+       (datetime(2027, 1, 2, 10, 0, tzinfo=IST), None)]
+got = [A.due_notice(n, t) for t, _ in seq]
+check("reminders: 5 days, never at night, 1 day, then the expiry notice once",
+      got == [e for _, e in seq], got)
+
+print("bot access flow")
+tg, pub = reset("access")
+CLOCK[0] = datetime(2026, 12, 1, 9, 0, tzinfo=IST); pub.run_once(CLOCK[0])
+side = []
+send = lambda cid, text, markup=None: side.append((cid, text, markup))
+ST = {"channel": CH, "owner_id": OWNER, "delay_min": 15}
+txt, kb = T.reply_for("/start", "501", "Asha", ST, "asha_k", send)
+check("new user: welcome + free access line", "Free access until <b>31 Dec 2026</b> (30 days left)" in txt, txt[-120:])
+T.reply_for("/start", OWNER, "Rahul", ST, "", send)
+CLOCK[0] = datetime(2026, 12, 1, 10, 0, tzinfo=IST)
+feed.trade_entry(call_sell(2), 25900, strength="STRONG"); pub.run_once(CLOCK[0])
+check("in trial: live DM", any("NEW TRADE" in m for m in msgs(tg, "501")))
+CLOCK[0] = datetime(2026, 12, 26, 11, 0, tzinfo=IST); pub.run_once(CLOCK[0])
+check("day 25: 5-day reminder with a pay button", any("5 days left" in m[2] and m[3] == T.pay_button()
+                                                     for m in tg.sent if m[1] == "501"))
+check("owner gets no reminders", not any("left" in m for m in msgs(tg, OWNER)))
+CLOCK[0] = datetime(2027, 1, 1, 10, 0, tzinfo=IST); pub.run_once(CLOCK[0])
+check("expiry notice sent", any("Live trade alerts are paused" in m for m in msgs(tg, "501")))
+before = len(msgs(tg, "501"))
+feed.trade_exit(call_sell(2), 50.0, 3000.0, "TARGET", 25800); pub.run_once(CLOCK[0])
+check("expired: no live DMs", len(msgs(tg, "501")) == before, msgs(tg, "501")[-1:])
+check("owner still gets them", any("TRADE CLOSED" in m for m in msgs(tg, OWNER)))
+txt, kb = T.reply_for("💰 Margin", "501", "Asha", ST, "asha_k", send)
+check("expired: buttons answer with how to continue", "Live trade alerts are paused" in txt and kb == T.pay_button(), txt)
+ans = T.on_callback("pay:request", "501", ST, send)
+check("'I want to continue' → owner is told who, with ready commands", side and side[-1][0] == OWNER
+      and "Asha" in side[-1][1] and "@asha_k" in side[-1][1] and "/paid 501 1" in side[-1][1] and "We've got your request" in ans, side[-1:])
+txt, _ = T.reply_for("/paid 501 1 999", "501", "Asha", ST, "asha_k", send)
+check("non-owner can't run /paid", "Live trade alerts are paused" in txt)
+txt, _ = T.reply_for("/paid @asha_k 1 999", OWNER, "Rahul", ST, "", send)
+check("owner /paid: recorded, member told", "Asha: paid 1 month (₹999)" in txt and "31 Jan 2027" in txt
+      and side[-1][0] == "501" and "Payment received" in side[-1][1], txt)
+check("paid member gets live DMs again", T.reply_for("📍 Trade & SL", "501", "Asha", ST)[0].startswith("No open trade")
+      or "Open trade" in T.reply_for("📍 Trade & SL", "501", "Asha", ST)[0])
+txt, _ = T.reply_for("/members", OWNER, "Rahul", ST, "", send)
+check("/members lists status, end date and amount paid", "<code>501</code> Asha @asha_k" in txt and "<b>paid</b>" in txt
+      and "paid ₹999" in txt and "<b>owner</b>" in txt, txt)
+txt, _ = T.reply_for("/msg ash Your UPI ID is abc@upi", OWNER, "Rahul", ST, "", send)
+check("/msg relays through the bot", side[-1][0] == "501" and "abc@upi" in side[-1][1] and "Sent to Asha" in txt)
+txt, _ = T.reply_for("/revoke 501", OWNER, "Rahul", ST, "", send)
+check("/revoke ends access", "access ended now" in txt and not A.has_access(T.load_subs()["501"], CLOCK[0]))
+txt, _ = T.reply_for("/extend 501 7", OWNER, "Rahul", ST, "", send)
+check("/extend gives days back", "+7 days" in txt and A.status(T.load_subs()["501"], CLOCK[0]) == "paid", txt)
+
+print("channel runs 15 min late")
+tg, pub = reset("delay", delay=15)
+CLOCK[0] = datetime(2026, 12, 2, 8, 0, tzinfo=IST); pub.run_once(CLOCK[0])
+T.reply_for("/start", "601", "Dev", {"channel": CH, "owner_id": OWNER})
+CLOCK[0] = datetime(2026, 12, 2, 9, 15, tzinfo=IST)
+feed.scan_result(NS(action="PUT_SELL", strength="MODERATE", score=2, pcr=1.1, resistance_level=26000,
+                    support_level=25700, call_wall=26000, put_wall=25600), 25800)
+pub.run_once(CLOCK[0])
+check("09:15 scan not in the channel yet", not msgs(tg, CH))
+CLOCK[0] = datetime(2026, 12, 2, 10, 0, tzinfo=IST)
+t = call_sell(2); feed.trade_entry(t, 25900, strength="STRONG"); pub.run_once(CLOCK[0])
+check("10:00: the DM is live, the channel only has the 09:15 scan (posted at 09:30+)",
+      any("NEW TRADE" in m for m in msgs(tg, "601")) and len(msgs(tg, CH)) == 1 and "First scan" in msgs(tg, CH)[0])
+CLOCK[0] = datetime(2026, 12, 2, 10, 5, tzinfo=IST); feed.trade_exit(t, 90.0, 5850.0, "TARGET", 25850); pub.run_once(CLOCK[0])
+check("10:05: exit DM live, channel still waiting", any("TRADE CLOSED" in m for m in msgs(tg, "601")) and len(msgs(tg, CH)) == 1)
+CLOCK[0] = datetime(2026, 12, 2, 10, 15, tzinfo=IST); pub.run_once(CLOCK[0])
+check("10:15: entry reaches the channel, exit not yet", len(msgs(tg, CH)) == 2 and "NEW TRADE" in msgs(tg, CH)[1]
+      and "🕒 Posted 15 min after the trade" in msgs(tg, CH)[1] and "⏰ 10:00 IST" in msgs(tg, CH)[1])
+CLOCK[0] = datetime(2026, 12, 2, 10, 20, tzinfo=IST); pub.run_once(CLOCK[0])
+check("10:20: exit follows, order kept", len(msgs(tg, CH)) == 3 and "TRADE CLOSED" in msgs(tg, CH)[2])
+tg.fail_next = {CH: [429]}
+CLOCK[0] = datetime(2026, 12, 2, 15, 35, tzinfo=IST); feed.pnl_snapshot(5850.0, None, label="CLOSE"); pub.run_once(CLOCK[0])
+CLOCK[0] = datetime(2026, 12, 2, 15, 50, tzinfo=IST); pub.run_once(CLOCK[0])
+check("channel 429 keeps the post queued", len(msgs(tg, CH)) == 3)
+pub.run_once(CLOCK[0])
+check("…and sends it on the next pass", len(msgs(tg, CH)) == 4 and "Day closed" in msgs(tg, CH)[3])
+check("queue survives a restart (kept in state)", json.loads(T.STATE.read_text())["channel_queue"] == [])
 
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 sys.exit(1 if FAIL else 0)

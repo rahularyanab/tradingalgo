@@ -30,13 +30,14 @@ import logging
 import os
 import threading
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
 import requests
 
 import paths as _paths
+from publish import access as A
 from publish import follow as F
 from publish import x_poster as X           # shared formatting helpers, holiday calendar, IST clock
 
@@ -99,7 +100,12 @@ def load_settings() -> dict:
     channel = get("TG_CHANNEL")
     if channel and not channel.startswith("@") and not channel.lstrip("-").isdigit():
         channel = "@" + channel
-    return {"token": get("TG_BOT_TOKEN"), "channel": channel, "live": get("TG_LIVE") == "1"}
+    try:
+        delay = max(0, int(get("TG_CHANNEL_DELAY_MIN") or 15))
+    except ValueError:
+        delay = 15
+    return {"token": get("TG_BOT_TOKEN"), "channel": channel, "live": get("TG_LIVE") == "1",
+            "owner_id": get("TG_OWNER_ID"), "pay_contact": get("TG_PAY_CONTACT"), "delay_min": delay}
 
 
 # ── Telegram API ─────────────────────────────────────────────────────────────
@@ -366,18 +372,58 @@ class Publisher:
                 subs[str(chat_id)]["blocked"] = True
                 save_subs(subs)
 
-    def _channel(self, text: str, tag: str) -> None:
-        if self.settings.get("channel"):
-            self._out(self.settings["channel"], text, tag, required=True,
-                      markup=bot_button(self.tg.username if self.tg else ""))
+    def _channel(self, text: str, tag: str, ev: Optional[dict] = None, trade: bool = False) -> None:
+        """Queue a channel post; it goes out `delay_min` minutes after the event (the public channel
+        runs late — live alerts are for people with access). Order is always kept."""
+        if not self.settings.get("channel"):
+            return
+        delay = self.settings.get("delay_min", 15)
+        if trade and delay:
+            text += f"\n\n🕒 Posted {delay} min after the trade. Live alerts: tap below."
+        base = X._ts(ev) if ev else X.now_ist()
+        due = (base + timedelta(minutes=delay)).isoformat(timespec="seconds")
+        self._queue.append({"due": due, "text": text, "tag": tag})
+
+    def flush_channel(self, st: dict, now: datetime) -> None:
+        q = st.setdefault("channel_queue", [])
+        while q and datetime.fromisoformat(q[0]["due"]) <= now:
+            item = q[0]
+            try:
+                self._out(self.settings["channel"], item["text"], item["tag"], required=True,
+                          markup=bot_button(self.tg.username if self.tg else ""))
+            except _Retry:
+                return                                       # keep it; retried next loop, order kept
+            q.pop(0)
+            _save(STATE, st)
 
     def _dms(self, build, tag: str) -> None:
+        now = X.now_ist()
+        owner = str(self.settings.get("owner_id") or "")
         for chat_id, sub in load_subs().items():
             if not sub.get("alerts", True) or sub.get("blocked"):
                 continue
+            A.ensure_trial(sub, now)
+            if not A.has_access(sub, now, chat_id == owner):
+                continue                                     # free month over and not paid
             text = build(sub.get("plan", "standard"))
             if text:
                 self._out(chat_id, text, tag, required=False)
+
+    def notices(self, now: datetime) -> None:
+        """Reminders 5 and 1 days before access ends, and a notice when it ends."""
+        owner = str(self.settings.get("owner_id") or "")
+        subs = load_subs()
+        changed = False
+        for chat_id, sub in subs.items():
+            A.ensure_trial(sub, now)
+            due = A.due_notice(sub, now, chat_id == owner)
+            if due is None:
+                continue
+            changed = True
+            self._out(chat_id, notice_text(sub, due, self.settings), f"notice {due}d", required=False,
+                      markup=pay_button())
+        if changed:
+            save_subs(subs)
 
     def handle(self, ev: dict, st: dict, now: datetime, holidays: set) -> None:
         t = ev["type"]
@@ -393,7 +439,7 @@ class Publisher:
             positions[pid or "?"] = pos
             st["last_entry"] = pos
             if today:
-                self._channel(entry_msg(ev, pos, "standard"), tag)
+                self._channel(entry_msg(ev, pos, "standard"), tag, ev, trade=True)
                 self._dms(lambda plan: entry_msg(ev, pos, plan), tag)
             return
 
@@ -405,7 +451,7 @@ class Publisher:
             deltas = {plan: r["deltas"] for plan, r in res.items()}
             if t == "ADD":
                 if today:
-                    self._channel(add_msg(ev, pos, "standard", deltas["standard"]), tag)
+                    self._channel(add_msg(ev, pos, "standard", deltas["standard"]), tag, ev, trade=True)
                     self._dms(lambda plan: add_msg(ev, pos, plan, deltas[plan]), tag)
                 return
             closed = bool(ev.get("position_closed"))
@@ -421,13 +467,13 @@ class Publisher:
                 return exit_msg(ev, pos, plan, deltas[plan], round(res[plan]["slice_rs"]),
                                 rec["rs"][plan] if closed else None)
             if today:
-                self._channel(build("standard"), tag)
+                self._channel(build("standard"), tag, ev, trade=True)
                 self._dms(build, tag)
             return
 
         if t == "SCAN":
             if today and not day["scanned"] and X.SCAN_FROM <= ts.time() < X.SCAN_UNTIL:
-                self._channel(scan_msg(ev), tag)
+                self._channel(scan_msg(ev), tag, ev)
                 day["scanned"] = True
             return
 
@@ -439,7 +485,7 @@ class Publisher:
                 if day["closed"]:
                     return
                 st.setdefault("history", {}).setdefault(day["date"], [])
-                self._channel(close_msg(ev, st), tag)
+                self._channel(close_msg(ev, st), tag, ev)
                 if day["trades"]:
                     self._dms(lambda plan: close_msg(ev, st, plan, personal=True), tag)
                 day["closed"] = True
@@ -447,7 +493,7 @@ class Publisher:
             if (now - ts).total_seconds() > SNAPSHOT_MAX_AGE:
                 return
             if ev.get("position_open") or day["trades"]:
-                self._channel(hourly_msg(ev, st), tag)
+                self._channel(hourly_msg(ev, st), tag, ev)
 
     def run_once(self, now: Optional[datetime] = None) -> None:
         now = (now or X.now_ist()).astimezone(X.IST)
@@ -461,18 +507,16 @@ class Publisher:
             logger.info(f"first start: cursor at seq {st['seq']} (history not replayed)")
             return
         _day(st, now)
+        self._queue = st.setdefault("channel_queue", [])
         for ev in sorted(events, key=lambda e: e.get("seq", 0)):
             if ev.get("seq", 0) <= st["seq"]:
                 continue
-            snapshot = json.dumps(st)
-            try:
-                self.handle(ev, st, now, holidays)
-            except _Retry:
-                st.clear(); st.update(json.loads(snapshot))
-                break
+            self.handle(ev, st, now, holidays)               # DMs now; channel posts are queued
             st["seq"] = ev["seq"]
             _save(STATE, st)
+        self.flush_channel(st, now)
         _save(STATE, st)
+        self.notices(now)
 
 
 def _read_outbox() -> list:
@@ -624,25 +668,166 @@ def _keyboard() -> dict:
     return {"keyboard": [[{"text": b} for b in row] for row in BUTTONS], "resize_keyboard": True, "is_persistent": True}
 
 
+def pay_button() -> dict:
+    return {"inline_keyboard": [[{"text": "💳 I want to continue", "callback_data": "pay:request"}]]}
+
+
+def _date(d: datetime) -> str:
+    return d.astimezone(X.IST).strftime("%-d %b %Y")
+
+
+def access_line(sub: dict, now: datetime, is_owner: bool) -> str:
+    st = A.status(sub, now, is_owner)
+    end = A.access_until(sub)
+    if st == "owner":
+        return "👑 Owner access"
+    if st == "paid":
+        return f"✅ Paid access until <b>{_date(end)}</b> ({A.days_left(sub, now)} days left)"
+    if st == "trial":
+        return f"🎁 Free access until <b>{_date(end)}</b> ({A.days_left(sub, now)} days left)"
+    return f"⏳ Access ended on {_date(end)}" if end else "⏳ No access"
+
+
+def notice_text(sub: dict, due: int, settings: dict) -> str:
+    end = A.access_until(sub)
+    what = "subscription" if sub.get("paid_until") else "free month"
+    contact = settings.get("pay_contact")
+    how = "To continue, tap the button below and we'll get back to you here" + (f", or contact {contact}" if contact else "") + "."
+    if due:
+        return (f"⏳ Your {what} ends on <b>{_date(end)}</b> — {due} day{'s' if due != 1 else ''} left.\n{how}")
+    channel = settings.get("channel") or "the public channel"
+    return (f"⏳ Your {what} ended on <b>{_date(end)}</b>. Live trade alerts are paused.\n"
+            f"{channel} still shows every trade, {settings.get('delay_min', 15)} minutes late.\n{how}")
+
+
+def expired_text(sub: dict, settings: dict) -> str:
+    return notice_text(sub, 0, settings)
+
+
+OWNER_HELP = ("👑 <b>Owner commands</b>\n"
+              "/members — everyone, status and end date\n"
+              "/paid &lt;who&gt; &lt;months&gt; [amount] — record a payment, add months\n"
+              "/extend &lt;who&gt; &lt;days&gt; — add free days\n"
+              "/revoke &lt;who&gt; — end access now\n"
+              "/msg &lt;who&gt; &lt;text&gt; — message someone through the bot\n"
+              "&lt;who&gt; = chat id, @username or the start of their name")
+
+
+def owner_command(cmd: str, args: list, subs: dict, now: datetime, settings: dict, send) -> Optional[str]:
+    """Owner-only commands. Returns the reply, or None if `cmd` isn't one of them."""
+    if cmd == "/owner":
+        return OWNER_HELP
+    if cmd == "/members":
+        if not subs:
+            return "No one has started the bot yet."
+        rows = []
+        owner = str(settings.get("owner_id") or "")
+        for cid, sub in sorted(subs.items(), key=lambda kv: A.access_until(kv[1]) or now):
+            A.ensure_trial(sub, now)
+            st = A.status(sub, now, cid == owner)
+            end = A.access_until(sub)
+            paid = sum((p.get("amount") or 0) for p in sub.get("payments", []))
+            rows.append(f"<code>{cid}</code> {html.escape(sub.get('name') or '?')}"
+                        + (f" @{sub['username']}" if sub.get("username") else "")
+                        + f" · {sub.get('plan', 'standard')} · <b>{st}</b>"
+                        + (f" → {_date(end)}" if end and st != "owner" else "")
+                        + (f" · paid ₹{paid:,.0f}" if paid else "")
+                        + (" · blocked bot" if sub.get("blocked") else ""))
+        counts = {}
+        for cid, sub in subs.items():
+            k = A.status(sub, now, cid == owner)
+            counts[k] = counts.get(k, 0) + 1
+        return (f"👥 <b>{len(subs)} members</b> · " + " · ".join(f"{k} {v}" for k, v in sorted(counts.items()))
+                + "\n\n" + "\n".join(rows[:60]) + ("\n…" if len(rows) > 60 else ""))
+    if cmd not in ("/paid", "/extend", "/revoke", "/msg"):
+        return None
+    if not args:
+        return OWNER_HELP
+    found = A.find(subs, args[0])
+    if not found:
+        return f"No member matches “{html.escape(args[0])}”. Try /members."
+    if len(found) > 1:
+        return "More than one match: " + ", ".join(f"<code>{c}</code> {html.escape(subs[c].get('name') or '')}" for c in found)
+    cid = found[0]
+    sub = subs[cid]
+    A.ensure_trial(sub, now)
+    name = html.escape(sub.get("name") or cid)
+    if cmd == "/paid":
+        try:
+            months = int(args[1])
+            amount = float(args[2]) if len(args) > 2 else None
+            assert 1 <= months <= 24
+        except (IndexError, ValueError, AssertionError):
+            return "Usage: /paid &lt;who&gt; &lt;months 1–24&gt; [amount]"
+        end = A.add_paid(sub, now, months, amount, "owner")
+        save_subs(subs)
+        send(cid, f"✅ Payment received — thank you!\nLive trade alerts are on until <b>{_date(end)}</b>.", _keyboard())
+        return f"✅ {name}: paid {months} month{'s' if months != 1 else ''}" + (f" (₹{amount:,.0f})" if amount else "") + f" → access until {_date(end)}. They've been told."
+    if cmd == "/extend":
+        try:
+            days = int(args[1])
+            assert 1 <= days <= 365
+        except (IndexError, ValueError, AssertionError):
+            return "Usage: /extend &lt;who&gt; &lt;days 1–365&gt;"
+        end = A.extend(sub, now, days)
+        save_subs(subs)
+        send(cid, f"🎁 Your access has been extended until <b>{_date(end)}</b>.", _keyboard())
+        return f"✅ {name}: +{days} days → access until {_date(end)}. They've been told."
+    if cmd == "/revoke":
+        A.revoke(sub, now)
+        save_subs(subs)
+        return f"⛔ {name}: access ended now. (They were not messaged.)"
+    if cmd == "/msg":
+        text = " ".join(args[1:]).strip()
+        if not text:
+            return "Usage: /msg &lt;who&gt; &lt;text&gt;"
+        send(cid, f"💬 <b>From Theta Desk</b>\n{html.escape(text)}", None)
+        return f"✉️ Sent to {name}."
+    return None
+
+
 def _size_buttons() -> dict:
     return {"inline_keyboard": [[{"text": "Small · 1 lot  (₹2 lakh capital)", "callback_data": "plan:small"}],
                                 [{"text": "Standard · 3/2/1  (₹5 lakh capital)", "callback_data": "plan:standard"}]]}
 
 
-def reply_for(text: str, chat_id: str, first_name: str, settings: dict) -> tuple[str, Optional[dict]]:
-    """The bot's answer to one message: (html text, reply_markup or None)."""
-    cmd = BUTTON_CMD.get(text.strip(), text.strip()).split()[0].split("@")[0].lower() if text.strip() else ""
+def reply_for(text: str, chat_id: str, first_name: str, settings: dict, username: str = "",
+              send=None) -> tuple[str, Optional[dict]]:
+    """The bot's answer to one message: (html text, reply_markup or None). `send(chat_id, text, markup)`
+    delivers side messages (owner commands that notify a member)."""
+    send = send or (lambda *a: None)
+    words = BUTTON_CMD.get(text.strip(), text.strip()).split() if text.strip() else []
+    cmd = words[0].split("@")[0].lower() if words else ""
+    now = X.now_ist()
     subs = load_subs()
     sub = subs.get(chat_id)
     st = _load(STATE, {}) or {}
     channel = settings.get("channel") or ""
+    is_owner = bool(settings.get("owner_id")) and chat_id == str(settings["owner_id"])
+
+    if sub is not None and username and sub.get("username") != username:
+        sub["username"] = username
+        save_subs(subs)
+
+    if is_owner:
+        out = owner_command(cmd, words[1:], subs, now, settings, send)
+        if out is not None:
+            return (out, None)
 
     if cmd == "/start" or sub is None:
         if sub is None:
-            subs[chat_id] = {"plan": "standard", "alerts": True, "name": first_name[:40],
-                             "joined": X.now_ist().isoformat(timespec="seconds")}
+            sub = subs[chat_id] = {"plan": "standard", "alerts": True, "name": first_name[:40],
+                                   "username": username or None, "joined": now.isoformat(timespec="seconds")}
+            A.ensure_trial(sub, now)
             save_subs(subs)
-        return (welcome_text(first_name, channel), _size_buttons())
+        A.ensure_trial(sub, now)
+        if not A.has_access(sub, now, is_owner):
+            return (welcome_text(first_name, channel) + "\n\n" + expired_text(sub, settings), pay_button())
+        return (welcome_text(first_name, channel) + "\n\n" + access_line(sub, now, is_owner), _size_buttons())
+
+    A.ensure_trial(sub, now)
+    if not A.has_access(sub, now, is_owner):
+        return (expired_text(sub, settings), pay_button())
 
     plan = sub.get("plan", "standard")
 
@@ -724,11 +909,32 @@ def reply_for(text: str, chat_id: str, first_name: str, settings: dict) -> tuple
                  f"{X.now_ist():%b} so far: <b>{X._rs(month_rs)}</b>\n<i>Before charges.</i>"), _keyboard())
 
     return ((f"I post every trade of our Nifty option-selling algo, sized for you.\n"
-             f"Your size: <b>{PLAN_LABEL[plan]}</b> · alerts {'on' if sub.get('alerts', True) else 'off'}\n\n"
+             f"Your size: <b>{PLAN_LABEL[plan]}</b> · alerts {'on' if sub.get('alerts', True) else 'off'}\n"
+             f"{access_line(sub, now, is_owner)}\n\n"
              f"Buttons: 📍 open trade & stop · 💰 margin · 🧾 charges · 📈 P&L · ⚙️ size · 🔔 alerts"), _keyboard())
 
 
-def on_callback(data: str, chat_id: str) -> str:
+def on_callback(data: str, chat_id: str, settings: Optional[dict] = None, send=None) -> str:
+    settings = settings or {}
+    send = send or (lambda *a: None)
+    if data == "pay:request":
+        subs = load_subs()
+        sub = subs.get(chat_id) or {}
+        owner = settings.get("owner_id")
+        now = X.now_ist()
+        if owner:
+            A.ensure_trial(sub, now) if sub else None
+            send(owner, (f"💳 <b>Payment request</b>\n{html.escape(sub.get('name') or '?')}"
+                         + (f" @{sub['username']}" if sub.get("username") else "")
+                         + f" · <code>{chat_id}</code> · {PLAN_LABEL.get(sub.get('plan', 'standard'))}\n"
+                         + (access_line(sub, now, False) if sub else "")
+                         + f"\nReply: /msg {chat_id} &lt;text&gt; · after payment: /paid {chat_id} 1 &lt;amount&gt;"), None)
+            sub["pay_requested"] = now.isoformat(timespec="seconds")
+            if chat_id in subs:
+                save_subs(subs)
+        contact = settings.get("pay_contact")
+        return ("🙏 Thanks! We've got your request and will message you here shortly with payment details."
+                + (f"\nOr contact {contact}." if contact else ""))
     if data.startswith("plan:") and data[5:] in F.PLANS:
         subs = load_subs()
         sub = subs.setdefault(chat_id, {"alerts": True, "joined": X.now_ist().isoformat(timespec="seconds")})
@@ -739,6 +945,10 @@ def on_callback(data: str, chat_id: str) -> str:
 
 
 def bot_loop(tg: TG, settings_ref: dict, stop: threading.Event) -> None:
+    def side(chat_id, text, markup=None):
+        r = tg.send(str(chat_id), text, **({"reply_markup": markup} if markup else {}))
+        if not r.get("ok"):
+            logger.warning(f"side message → {chat_id}: {r.get('error_code')} {r.get('description')}")
     offset = None
     while not stop.is_set():
         try:
@@ -755,11 +965,13 @@ def bot_loop(tg: TG, settings_ref: dict, stop: threading.Event) -> None:
                         q = u["callback_query"]
                         chat_id = str(q["message"]["chat"]["id"])
                         tg.call("answerCallbackQuery", callback_query_id=q["id"])
-                        tg.send(chat_id, on_callback(q.get("data", ""), chat_id), reply_markup=_keyboard())
+                        tg.send(chat_id, on_callback(q.get("data", ""), chat_id, settings_ref, side),
+                                reply_markup=_keyboard())
                     elif "message" in u and u["message"].get("chat", {}).get("type") == "private":
                         m = u["message"]
                         text, markup = reply_for(m.get("text", ""), str(m["chat"]["id"]),
-                                                 m.get("from", {}).get("first_name", ""), settings_ref)
+                                                 m.get("from", {}).get("first_name", ""), settings_ref,
+                                                 m.get("from", {}).get("username") or "", side)
                         tg.send(str(m["chat"]["id"]), text, **({"reply_markup": markup} if markup else {}))
                 except Exception as e:                       # noqa: BLE001 — one bad message never stops the bot
                     logger.exception(f"update {u.get('update_id')}: {e}")
