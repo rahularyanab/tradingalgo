@@ -29,3 +29,18 @@ QUOTES = [
     "One great day proves nothing. A hundred average days prove everything.",
     "Show me the drawdown and I'll tell you if the profits are real.",
 ]
+
+# Hashtags by theme (2–3 per post reads best on X). Quote i uses TAGS[THEME_OF[i]]; a new quote appended without a
+# theme falls back to the last theme.
+TAGS = {
+    "theta": "#OptionSelling #Theta #Nifty",
+    "risk": "#RiskManagement #StopLoss #Nifty",
+    "discipline": "#AlgoTrading #TradingDiscipline #Nifty",
+    "honesty": "#TradingPsychology #TrackRecord #Nifty",
+}
+THEME_OF = ["theta"] * 6 + ["risk"] * 6 + ["discipline"] * 6 + ["honesty"] * 7
+
+
+def tags_for(i: int) -> str:
+    i %= len(QUOTES)
+    return TAGS[THEME_OF[i] if i < len(THEME_OF) else THEME_OF[-1]]

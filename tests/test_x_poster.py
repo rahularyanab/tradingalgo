@@ -309,6 +309,12 @@ check("quote counts toward the daily cap", c["day"]["posts"] == 2)
 check("all 25 quotes fit in 280 with their footer", all(xp._weight(xp.quote_text(i, xp.date(2026, 12, 30))) <= 280
       and xp.quote_text(i, xp.date(2026, 12, 30)).startswith(QUOTES[i]) for i in range(len(QUOTES))))
 check("after 25 it starts again from the first", xp.quote_text(25, xp.date(2027, 1, 4)).startswith(QUOTES[0]))
+check("theme hashtags: theta, risk, discipline, honesty — each ends with them, #Nifty always",
+      xp.quote_text(0, xp.date(2026, 12, 30)).endswith("#OptionSelling #Theta #Nifty")
+      and xp.quote_text(7, xp.date(2026, 12, 30)).endswith("#RiskManagement #StopLoss #Nifty")
+      and xp.quote_text(13, xp.date(2026, 12, 30)).endswith("#AlgoTrading #TradingDiscipline #Nifty")
+      and xp.quote_text(24, xp.date(2026, 12, 30)).endswith("#TradingPsychology #TrackRecord #Nifty")
+      and all(xp.quote_text(i, xp.date(2026, 12, 30)).endswith("#Nifty") for i in range(25)))
 
 # ── 7. credentials ────────────────────────────────────────────────────────────
 print("credentials")

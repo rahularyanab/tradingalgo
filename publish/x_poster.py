@@ -160,9 +160,9 @@ def is_market_day(d: date, holidays: Optional[set] = None) -> bool:
 # ── post texts ───────────────────────────────────────────────────────────────
 
 def quote_text(idx: int, d: date) -> str:
-    from publish.quotes import QUOTES
+    from publish.quotes import QUOTES, tags_for
     q = QUOTES[idx % len(QUOTES)]
-    return _fit(f"{q}\n\n— Theta Desk · {_day_label(d)}\n#TradingWisdom #Nifty")      # the date keeps repeats unique
+    return _fit(f"{q}\n\n— Theta Desk · {_day_label(d)}\n{tags_for(idx)}")      # the date keeps repeats unique
 
 
 def greeting_text(d: date) -> str:
