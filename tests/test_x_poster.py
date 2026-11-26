@@ -22,6 +22,7 @@ IST = xp.IST
 PASS, FAIL = [], []
 CLOCK = [datetime(2026, 11, 27, 8, 0, tzinfo=IST)]
 feed._now = lambda: CLOCK[0]                     # feed events are stamped with the simulated clock
+xp.DELAY_MIN = 0                                     # trade-post scenarios run in real time; section 7c tests the delay
 QUOTE_WINDOW = (xp.QUOTE_FROM, xp.QUOTE_UNTIL)
 xp.QUOTE_FROM = xp.QUOTE_UNTIL = xp.dtime(0, 0)     # off in the trade-post scenarios; section 6b turns it on
 xp.HOLIDAYS_FILE = TMP / "holidays.txt"
@@ -315,6 +316,34 @@ check("theme hashtags: theta, risk, discipline, honesty — each ends with them,
       and xp.quote_text(13, xp.date(2026, 12, 30)).endswith("#AlgoTrading #TradingDiscipline #Nifty")
       and xp.quote_text(24, xp.date(2026, 12, 30)).endswith("#TradingPsychology #TrackRecord #Nifty")
       and all(xp.quote_text(i, xp.date(2026, 12, 30)).endswith("#Nifty") for i in range(25)))
+
+# ── 7c. X runs 5 minutes behind the trades ────────────────────────────────────
+print("X 5 minutes late")
+xp.DELAY_MIN = 5
+xp.QUOTE_FROM = xp.QUOTE_UNTIL = xp.dtime(0, 0)
+reset("delay")
+at(2026, 12, 10, 8, 50); tick()
+at(2026, 12, 10, 9, 0); tick()
+check("09:00 greeting is NOT delayed", len(SENT) == 1 and "Good morning" in SENT[0][1])
+at(2026, 12, 10, 9, 15); scan(); tick()
+check("09:15 scan held", len(SENT) == 1)
+at(2026, 12, 10, 9, 20); tick()
+check("09:20 scan posted, titled with its real time", len(SENT) == 2 and "First scan 09:15" in SENT[1][1])
+at(2026, 12, 10, 10, 0); t = directional(); feed.trade_entry(t, 24300, strength="STRONG"); tick()
+at(2026, 12, 10, 10, 3); feed.trade_exit(t, 70.0, 11700.0, "TARGET", 24200); tick()
+check("10:03: neither entry nor exit out yet", len(SENT) == 2)
+at(2026, 12, 10, 10, 5); tick()
+check("10:05: entry out, real time + 'posted 5 min late', not marked '(delayed)'", len(SENT) == 3
+      and "10:00 IST · posted 5 min late" in SENT[2][1] and "(delayed)" not in SENT[2][1], SENT[-1])
+at(2026, 12, 10, 10, 8); tick()
+check("10:08: exit follows in order", len(SENT) == 4 and "TRADE CLOSED" in SENT[3][1]
+      and "10:03 IST · posted 5 min late" in SENT[3][1], SENT[-1])
+at(2026, 12, 10, 15, 35); feed.pnl_snapshot(11700.0, None, label="CLOSE"); tick()
+check("15:35 close held", "Day closed" not in SENT[-1][1])
+at(2026, 12, 10, 15, 40); tick()
+check("15:40 close posted", "Day closed" in SENT[-1][1])
+check("all within 280", all(xp._weight(x) <= 280 for x in texts()))
+xp.DELAY_MIN = 0
 
 # ── 7. credentials ────────────────────────────────────────────────────────────
 print("credentials")
