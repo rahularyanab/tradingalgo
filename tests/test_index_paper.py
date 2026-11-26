@@ -35,7 +35,7 @@ total = 1000000
 [risk]
 max_daily_loss = 5000
 experience = "new"
-preferred_lots = 3
+preferred_lots = 2
 allow_above_suggestion = true
 [overrides]
 SELL_PREMIUM_MIN = 400
@@ -252,10 +252,10 @@ def main():
         check(f"{idx}: contract details ({x['exch']}, {x['quote']}, lot {x['lot']}, step {x['step']})",
               (r["NFO_EXCHANGE"], r["INDEX_QUOTE_KEY"], r["NIFTY_LOT_SIZE"], r["STRIKE_STEP"], r["INDEX_LABEL"]) == (x["exch"], x["quote"], x["lot"], x["step"], x["label"]), str(r))
         check(f"{idx}: SL buffer scaled to {x['sl']} pts, hedge band scaled", r["SL_BUFFER_POINTS"] == x["sl"] and r["HEDGE_PRICE_MIN"] > 3)
-        check(f"{idx}: lots 3/2/2, pyramid caps 6/4, steps 2", (r["LOTS_STRONG"], r["LOTS_MODERATE"], r["LOTS_STRANGLE"], r["MAX_LOTS_DIRECTIONAL"],
-              r["MAX_LOTS_STRANGLE_LEG"], r["PYRAMID_STEP_LOTS"], r["PROFIT_BOOK_STEP_LOTS"], r["PROTECTED_MAX_LOTS"]) == (3, 2, 2, 6, 4, 2, 2, 2), str(r))
-        check(f"{idx}: ₹ limits halved — loss 5000, lock 1500, booking 5000/7500, day-profit 2500",
-              (r["DAILY_MAX_LOSS"], r["PROFIT_LOCK_ARM_PNL"], r["PROFIT_BOOK_STEP1_PNL"], r["PROFIT_BOOK_STEP2_PNL"], r["DAY_PROFIT_ARM_PNL"]) == (5000, 1500, 5000, 7500, 2500), str(r))
+        check(f"{idx}: lots 2/1/1, pyramid caps 4/2, steps 1", (r["LOTS_STRONG"], r["LOTS_MODERATE"], r["LOTS_STRANGLE"], r["MAX_LOTS_DIRECTIONAL"],
+              r["MAX_LOTS_STRANGLE_LEG"], r["PYRAMID_STEP_LOTS"], r["PROFIT_BOOK_STEP_LOTS"], r["PROTECTED_MAX_LOTS"]) == (2, 1, 1, 4, 2, 1, 1, 1), str(r))
+        check(f"{idx}: ₹ limits — loss 5000, lock 1000, booking 3300/5000, day-profit 1700",
+              (r["DAILY_MAX_LOSS"], r["PROFIT_LOCK_ARM_PNL"], r["PROFIT_BOOK_STEP1_PNL"], r["PROFIT_BOOK_STEP2_PNL"], r["DAY_PROFIT_ARM_PNL"]) == (5000, 1000, 3300, 5000, 1700), str(r))
         check(f"{idx}: paper on Zerodha, PaperKite client", r["BROKER"] == "zerodha" and r["BROKER_PAPER"] is True and r["paper"] is True and r["client"] == "PaperKite")
         check(f"{idx}: inherited Telegram secrets cleared (instance .env only)", r["TELEGRAM_BOT_TOKEN"] == "")
         check(f"{idx}: owner token — missing / stale refused, today's used", r["token_missing_raises"] and r["stale_token_raises"] and r["token"] == "abc")
