@@ -134,6 +134,10 @@ class Engine:
         for o in orders:
             leg, qty = o["leg"], int(o["qty"])
             if o["role"] == "hedge":
+                room = self.s.max_lots_per_leg * LOT - pos["legs"].get(leg, {}).get("qty", 0)
+                if qty > room:                               # cap the hedge too, so a capped sell never leaves spare hedge
+                    qty = max(0, room)
+                    self.note(f"#{ins['seq']} hedge {o['symbol']} cut to {qty} by the {self.s.max_lots_per_leg}-lot cap")
                 f = self.v.execute("BUY", o["symbol"], qty, o.get("ref_price"))
                 hedge_got[leg] = hedge_got.get(leg, 0) + f.qty
                 h = pos["hedges"].setdefault(leg, {"symbol": o["symbol"], "qty": 0})

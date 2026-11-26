@@ -1,0 +1,19 @@
+[Unit]
+Description=Theta Desk setup page (127.0.0.1:8090; public only through Caddy + the domain)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/trading-algo
+ExecStart=/opt/trading-algo/venv/bin/python -m publish.setup_web
+Restart=always
+RestartSec=10
+MemoryMax=80M
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=setup-web
+
+[Install]
+WantedBy=multi-user.target

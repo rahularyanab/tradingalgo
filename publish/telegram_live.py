@@ -711,6 +711,11 @@ OWNER_HELP = ("👑 <b>Owner commands</b>\n"
               "/revoke &lt;who&gt; — end access now\n"
               "/msg &lt;who&gt; &lt;text&gt; — message someone through the bot\n"
               "/key &lt;who&gt; — auto-trading key for a paid member (new key each time; 'off' removes it)\n"
+              "/autotrade &lt;who&gt; zerodha|angel — set up their own trading server (paper first)\n"
+              "/fleet — every trading server and its stage\n"
+              "/golive &lt;who&gt; — switch their server to LIVE, capped at 1 lot\n"
+              "/fullsize &lt;who&gt; — lift the 1-lot cap (their full plan size)\n"
+              "/paper &lt;who&gt; — back to paper mode\n"
               "&lt;who&gt; = chat id, @username or the start of their name")
 
 
@@ -743,7 +748,20 @@ def owner_command(cmd: str, args: list, subs: dict, now: datetime, settings: dic
             counts[k] = counts.get(k, 0) + 1
         return (f"👥 <b>{len(subs)} members</b> · " + " · ".join(f"{k} {v}" for k, v in sorted(counts.items()))
                 + "\n\n" + "\n".join(rows[:60]) + ("\n…" if len(rows) > 60 else ""))
-    if cmd not in ("/paid", "/extend", "/revoke", "/msg", "/key"):
+    if cmd == "/fleet":
+        from publish import fleet as FL
+        fl = FL.load()
+        if not fl:
+            return "No trading servers yet. Start one with /autotrade &lt;who&gt; zerodha|angel."
+        rows = []
+        for cid, rec in fl.items():
+            name = html.escape(subs.get(cid, {}).get("name") or cid)
+            rows.append(f"<code>{cid}</code> {name} · {rec.get('broker')} · <b>{rec['state']}</b>"
+                        + (f" · {rec['ip']}" if rec.get("ip") else "")
+                        + (f" · cap {rec['cap_lots']}" if rec.get("cap_lots") else "")
+                        + (f"\n   ⚠️ {html.escape(rec['error'][:120])}" if rec.get("error") else ""))
+        return "🖥 <b>Trading servers</b>\n" + "\n".join(rows)
+    if cmd not in ("/paid", "/extend", "/revoke", "/msg", "/key", "/autotrade", "/golive", "/fullsize", "/paper"):
         return None
     if not args:
         return OWNER_HELP
@@ -800,6 +818,30 @@ def owner_command(cmd: str, args: list, subs: dict, now: datetime, settings: dic
         return (f"🔑 Auto-trading key for {name} ({PLAN_LABEL[sub.get('plan', 'standard')]}):\n<code>{key}</code>\n\n"
                 f"Shown only once — it goes into their executor's setup. Any older key for them stops working now. "
                 f"Delete this message after copying it.")
+    if cmd == "/autotrade":
+        from publish import fleet as FL
+        broker = (args[1] if len(args) > 1 else "").lower()
+        if broker not in ("zerodha", "angel"):
+            return "Usage: /autotrade &lt;who&gt; zerodha|angel"
+        if A.status(sub, now) != "paid":
+            return f"{name} isn't on paid access — record the payment with /paid first."
+        rec = FL.request(cid, broker, now)
+        send(cid, ("🛠 We're setting up <b>your own trading server</b> now. In a few minutes I'll send you a short "
+                   "step-by-step guide to connect your " + ("Zerodha" if broker == "zerodha" else "Angel One") +
+                   " account. Nothing will trade until you've seen it work on paper."), None)
+        return (f"🖥 {name}: server {'requested' if rec['state'] == 'requested' else rec['state']} ({broker}). "
+                f"I'll message you when it's ready. Track it with /fleet.")
+    if cmd in ("/golive", "/fullsize", "/paper"):
+        from publish import fleet as FL
+        mode, cap = {"/golive": ("live", 1), "/fullsize": ("live", None), "/paper": ("paper", None)}[cmd]
+        res = FL.set_mode(cid, FL.ssh_factory(), mode, cap, now)
+        if res != "ok":
+            return f"⚠️ {name}: {html.escape(res)}"
+        send(cid, {"/golive": "🚀 <b>You're live.</b> Your server now places real orders in your account — "
+                              "<b>1 lot per trade</b> for the first days. You'll still get a summary every evening.",
+                   "/fullsize": "📈 Your server now trades your <b>full plan size</b>.",
+                   "/paper": "⏸ Your server is back in <b>paper mode</b> — it follows trades without placing real orders."}[cmd], None)
+        return f"✅ {name}: {mode}" + (", capped at 1 lot" if cap else "") + ". They've been told."
     if cmd == "/msg":
         text = " ".join(args[1:]).strip()
         if not text:
@@ -853,6 +895,18 @@ def reply_for(text: str, chat_id: str, first_name: str, settings: dict, username
         return (expired_text(sub, settings), pay_button())
 
     plan = sub.get("plan", "standard")
+
+    if cmd == "/setup":
+        from publish import fleet as FL
+        with FL.locked():
+            fl = FL.load()
+            rec = fl.get(chat_id)
+            if not rec or rec["state"] != "awaiting_broker":
+                return (("Your trading server is already connected." if rec and rec["state"] in ("paper", "live")
+                         else "There's no trading server for you yet — it's set up after payment."), _keyboard())
+            link = FL.new_setup_link(rec, now, FL.settings()["setup_base"])
+            FL.save(fl)
+        return (FL.guide_text(rec["broker"], rec["ip"]), FL.guide_buttons(link))
 
     if cmd in ("/size", "/lots"):
         return (f"Your size: <b>{PLAN_LABEL[plan]}</b>\nPick a new one:", _size_buttons())
@@ -958,6 +1012,20 @@ def on_callback(data: str, chat_id: str, settings: Optional[dict] = None, send=N
         contact = settings.get("pay_contact")
         return ("🙏 Thanks! We've got your request and will message you here shortly with payment details."
                 + (f"\nOr contact {contact}." if contact else ""))
+    if data in ("fleet:call", "fleet:live"):
+        subs = load_subs()
+        sub = subs.get(chat_id) or {}
+        who = html.escape(sub.get("name") or chat_id) + (f" @{sub['username']}" if sub.get("username") else "")
+        owner = settings.get("owner_id")
+        if data == "fleet:call":
+            if owner:
+                send(owner, f"📞 <b>Setup call requested</b> by {who} · <code>{chat_id}</code>\n"
+                            f"Reply with: /msg {chat_id} &lt;a time that suits you&gt;", None)
+            return "📞 Thanks — we'll message you here to fix a time for a 15-minute call."
+        if owner:
+            send(owner, f"🚀 <b>{who}</b> wants to go live (<code>{chat_id}</code>).\n"
+                        f"Switch them on with /golive {chat_id} (1 lot to start).", None)
+        return "🚀 Great — we'll do a quick check and switch you on. You'll get a message here when you're live."
     if data.startswith("plan:") and data[5:] in F.PLANS:
         subs = load_subs()
         sub = subs.setdefault(chat_id, {"alerts": True, "joined": X.now_ist().isoformat(timespec="seconds")})

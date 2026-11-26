@@ -29,3 +29,6 @@ exec_tls/
 
 # paper executor test homes (keys inside)
 executor_paper/
+
+# fleet settings (DigitalOcean token)
+fleet.env

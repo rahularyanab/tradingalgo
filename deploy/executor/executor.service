@@ -1,0 +1,19 @@
+[Unit]
+Description=Theta Desk executor (places this subscriber's plan orders in their own broker account)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/thetadesk-executor
+Environment=EXECUTOR_HOME=/opt/executor
+ExecStart=/opt/thetadesk-executor/venv/bin/python -m executor run
+Restart=always
+RestartSec=20
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=thetadesk-executor
+
+[Install]
+WantedBy=multi-user.target

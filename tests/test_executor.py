@@ -236,8 +236,10 @@ check("rule 3: hedge BUY fails → main is NOT sold (never naked)", e.st["positi
 pipeline("cap")
 at(9, 0); e, v = engine("cap", "standard", max_lots_per_leg=2)
 at(10, 0); feed.trade_entry(call_sell(2), 25900, strength="STRONG"); sync(); e.tick()
-check("rule 4: the per-leg cap cuts a 3-lot sell to 2, and the spare hedge is unwound",
-      next(iter(e.st["positions"].values()))["legs"]["CE"]["qty"] == 130 and any("cap" in x for x in e.events))
+check("rule 4: the per-leg cap cuts a 3-lot entry to 2 — hedge too, so nothing needs unwinding",
+      next(iter(e.st["positions"].values()))["legs"]["CE"]["qty"] == 130 and any("cap" in x for x in e.events)
+      and [c[:5] for c in v.calls if c[0] == "EXEC"] == [("EXEC", "BUY", "NIFTY26D0127050CE", 130, 130),
+                                                       ("EXEC", "SELL", "NIFTY26D0126000CE", 130, 130)], v.calls)
 
 pipeline("flat")
 at(9, 0); e, v = engine("flat")
