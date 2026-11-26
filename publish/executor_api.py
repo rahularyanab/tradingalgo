@@ -187,8 +187,17 @@ def tls_context(tls_dir: Path = TLS_DIR) -> ssl.SSLContext:
     return ctx
 
 
+class _Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        """Clients that hang up, fail the TLS handshake or probe the port: one quiet line, no traceback."""
+        import sys
+        logger.debug(f"connection from {client_address[0]} ended early: {sys.exc_info()[1]!r}")
+
+
 def serve(port: int = PORT, tls_dir: Path = TLS_DIR, host: str = "0.0.0.0") -> ThreadingHTTPServer:
-    httpd = ThreadingHTTPServer((host, port), Handler)
+    httpd = _Server((host, port), Handler)
     httpd.socket = tls_context(tls_dir).wrap_socket(httpd.socket, server_side=True)
     return httpd
 
