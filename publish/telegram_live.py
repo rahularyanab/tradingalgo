@@ -118,9 +118,15 @@ class TG:
         self.token = token
         self.username = ""
 
+    CONNECT_TIMEOUT = 5          # a connect attempt that hangs (seen on one of Telegram's IPv6 addresses) is
+                                 # abandoned fast and the next address tried, instead of stalling replies ~40 s
+
     def call(self, method: str, **params) -> dict:
-        r = requests.post(f"https://api.telegram.org/bot{self.token}/{method}", json=params,
-                          timeout=params.get("timeout", 0) + 15)
+        try:
+            r = requests.post(f"https://api.telegram.org/bot{self.token}/{method}", json=params,
+                              timeout=(self.CONNECT_TIMEOUT, params.get("timeout", 0) + 15))
+        except requests.RequestException as e:
+            return {"ok": False, "error_code": None, "description": f"network: {e.__class__.__name__}"}
         try:
             return r.json()
         except ValueError:
@@ -1065,7 +1071,7 @@ def bot_loop(tg: TG, settings_ref: dict, stop: threading.Event) -> None:
                            **({"offset": offset} if offset else {}))
             if not resp.get("ok"):
                 logger.warning(f"getUpdates: {resp.get('error_code')} {resp.get('description')}")
-                time.sleep(10)
+                time.sleep(1 if resp.get("error_code") is None else 10)   # network blip: retry at once
                 continue
             for u in resp.get("result", []):
                 offset = u["update_id"] + 1
@@ -1074,14 +1080,18 @@ def bot_loop(tg: TG, settings_ref: dict, stop: threading.Event) -> None:
                         q = u["callback_query"]
                         chat_id = str(q["message"]["chat"]["id"])
                         tg.call("answerCallbackQuery", callback_query_id=q["id"])
-                        tg.send(chat_id, on_callback(q.get("data", ""), chat_id, settings_ref, side),
-                                reply_markup=_keyboard())
+                        r = tg.send(chat_id, on_callback(q.get("data", ""), chat_id, settings_ref, side),
+                                    reply_markup=_keyboard())
+                        if not r.get("ok"):
+                            logger.warning(f"reply to button → {chat_id}: {r.get('error_code')} {r.get('description')}")
                     elif "message" in u and u["message"].get("chat", {}).get("type") == "private":
                         m = u["message"]
                         text, markup = reply_for(m.get("text", ""), str(m["chat"]["id"]),
                                                  m.get("from", {}).get("first_name", ""), settings_ref,
                                                  m.get("from", {}).get("username") or "", side)
-                        tg.send(str(m["chat"]["id"]), text, **({"reply_markup": markup} if markup else {}))
+                        r = tg.send(str(m["chat"]["id"]), text, **({"reply_markup": markup} if markup else {}))
+                        if not r.get("ok"):
+                            logger.warning(f"reply → {m['chat']['id']}: {r.get('error_code')} {r.get('description')}")
                 except Exception as e:                       # noqa: BLE001 — one bad message never stops the bot
                     logger.exception(f"update {u.get('update_id')}: {e}")
         except Exception as e:                               # noqa: BLE001
