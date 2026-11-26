@@ -64,7 +64,8 @@ def reset(tag, live=True, delay=0):
     T.STATE, T.SUBS, T.DRYRUN_LOG = TMP / f"{tag}_tg.json", TMP / f"{tag}_subs.json", TMP / f"{tag}_dry.log"
     feed._mark = None
     tg = FakeTG()
-    return tg, T.Publisher(tg, {"channel": CH, "live": live, "token": "TEST", "delay_min": delay, "owner_id": OWNER})
+    return tg, T.Publisher(tg, {"channel": CH, "live": live, "token": "TEST", "delay_min": delay, "owner_id": OWNER,
+                                "trial_delay_min": 0})      # the 5-min free-month delay has its own section
 
 
 def at(d, hh, mm):
@@ -421,6 +422,33 @@ txt, _ = T.reply_for("/invite", "901", "Asha", ST, "asha_k", send)
 check("counts update", "1 joined · 1 subscribed · 30 free days earned" in txt, txt)
 txt, _ = T.reply_for("/members", OWNER, "Rahul", ST, "", send)
 check("/members shows who brought whom", "Ravi @ravi_s" in txt and "via Asha" in txt, txt)
+
+print("free month: trade DMs 5 min late")
+tg, pub = reset("trialdelay")
+CLOCK[0] = datetime(2026, 12, 7, 9, 0, tzinfo=IST); pub.run_once(CLOCK[0])
+pub.settings["trial_delay_min"] = 5
+T.reply_for("/start", OWNER, "Rahul", {"owner_id": OWNER})
+T.reply_for("/start", "711", "Trial", {"owner_id": OWNER})
+T.reply_for("/start", "712", "Paid", {"owner_id": OWNER})
+subs_ = T.load_subs(); subs_["712"]["paid_until"] = "2027-03-01T00:00:00+05:30"; T.save_subs(subs_)
+CLOCK[0] = datetime(2026, 12, 7, 10, 0, tzinfo=IST)
+t = call_sell(2); feed.trade_entry(t, 25900, strength="STRONG"); pub.run_once(CLOCK[0])
+check("10:00 entry: paid member and owner get it live", any("NEW TRADE" in m for m in msgs(tg, "712"))
+      and any("NEW TRADE" in m for m in msgs(tg, OWNER)))
+check("…the free-month member doesn't yet", not any("NEW TRADE" in m for m in msgs(tg, "711")))
+CLOCK[0] = datetime(2026, 12, 7, 10, 3, tzinfo=IST)
+feed.trade_exit(t, 90.0, 5850.0, "TARGET", 25850); pub.run_once(CLOCK[0])
+check("10:03 exit: still nothing for the free member", not msgs(tg, "711"))
+CLOCK[0] = datetime(2026, 12, 7, 10, 5, tzinfo=IST); pub.run_once(CLOCK[0])
+fm = msgs(tg, "711")
+check("10:05: the entry arrives, with the 5-min note", len(fm) == 1 and "NEW TRADE" in fm[0]
+      and "Sent 5 min after the trade during your free month" in fm[0], fm)
+CLOCK[0] = datetime(2026, 12, 7, 10, 8, tzinfo=IST); pub.run_once(CLOCK[0])
+check("10:08: the exit follows, in order, once", [("NEW TRADE" in m, "TRADE CLOSED" in m) for m in msgs(tg, "711")]
+      == [(True, False), (False, True)])
+check("paid member's messages carry no delay note", not any("min after the trade" in m for m in msgs(tg, "712")))
+check("delay survives restarts (queue kept in state)", json.loads(T.STATE.read_text())["dm_queue"] == [])
+check("welcome explains it", "During your free month they arrive 5 minutes after each trade" in T.welcome_text("X", CH))
 
 print("channel runs 15 min late")
 tg, pub = reset("delay", delay=15)

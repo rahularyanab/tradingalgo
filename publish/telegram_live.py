@@ -109,8 +109,13 @@ def load_settings() -> dict:
         delay = max(0, int(get("TG_CHANNEL_DELAY_MIN") or 15))
     except ValueError:
         delay = 15
+    try:                                                     # free-month members see trades this much later
+        trial_delay = max(0, int(get("TG_TRIAL_DM_DELAY_MIN") or 5))
+    except ValueError:
+        trial_delay = 5
     return {"token": get("TG_BOT_TOKEN"), "channel": channel, "live": get("TG_LIVE") == "1",
-            "owner_id": get("TG_OWNER_ID"), "pay_contact": get("TG_PAY_CONTACT"), "delay_min": delay}
+            "owner_id": get("TG_OWNER_ID"), "pay_contact": get("TG_PAY_CONTACT"), "delay_min": delay,
+            "trial_delay_min": trial_delay}
 
 
 # ── Telegram API ─────────────────────────────────────────────────────────────
@@ -407,18 +412,38 @@ class Publisher:
             q.pop(0)
             _save(STATE, st)
 
-    def _dms(self, build, tag: str) -> None:
+    def _dms(self, build, tag: str, ev: Optional[dict] = None, trade: bool = False) -> None:
+        """Personal messages. Paid members and the owner get trade messages live; free-month members get them
+        `trial_delay_min` later (they watch the algo, they don't copy it)."""
         now = X.now_ist()
         owner = str(self.settings.get("owner_id") or "")
+        delay = self.settings.get("trial_delay_min", 5)
+        base = X._ts(ev) if ev else now
         for chat_id, sub in load_subs().items():
             if not sub.get("alerts", True) or sub.get("blocked"):
                 continue
             A.ensure_trial(sub, now)
-            if not A.has_access(sub, now, chat_id == owner):
+            status = A.status(sub, now, chat_id == owner)
+            if status == "expired":
                 continue                                     # free month over and not paid
             text = build(sub.get("plan", "standard"))
-            if text:
+            if not text:
+                continue
+            if trade and delay and status == "trial":
+                text += f"\n\n🕒 Sent {delay} min after the trade during your free month — live alerts with a subscription."
+                self._dm_queue.append({"due": (base + timedelta(minutes=delay)).isoformat(timespec="seconds"),
+                                       "chat": chat_id, "text": text, "tag": tag})
+            else:
                 self._out(chat_id, text, tag, required=False)
+
+    def flush_dms(self, st: dict, now: datetime) -> None:
+        q = st.setdefault("dm_queue", [])
+        while q and datetime.fromisoformat(q[0]["due"]) <= now:
+            item = q.pop(0)
+            sub = load_subs().get(item["chat"]) or {}
+            if sub.get("alerts", True) and not sub.get("blocked"):
+                self._out(item["chat"], item["text"], item["tag"], required=False)     # best effort, never repeated
+            _save(STATE, st)
 
     def notices(self, now: datetime) -> None:
         """Reminders 5 and 1 days before access ends, and a notice when it ends."""
@@ -451,7 +476,7 @@ class Publisher:
             st["last_entry"] = pos
             if today:
                 self._channel(entry_msg(ev, pos, "standard"), tag, ev, trade=True)
-                self._dms(lambda plan: entry_msg(ev, pos, plan), tag)
+                self._dms(lambda plan: entry_msg(ev, pos, plan), tag, ev, trade=True)
             return
 
         if t in ("ADD", "EXIT"):
@@ -463,7 +488,7 @@ class Publisher:
             if t == "ADD":
                 if today:
                     self._channel(add_msg(ev, pos, "standard", deltas["standard"]), tag, ev, trade=True)
-                    self._dms(lambda plan: add_msg(ev, pos, plan, deltas[plan]), tag)
+                    self._dms(lambda plan: add_msg(ev, pos, plan, deltas[plan]), tag, ev, trade=True)
                 return
             closed = bool(ev.get("position_closed"))
             rec = {"rs": {plan: round(F.realised(pos, plan)) for plan in F.PLANS},
@@ -479,7 +504,7 @@ class Publisher:
                                 rec["rs"][plan] if closed else None)
             if today:
                 self._channel(build("standard"), tag, ev, trade=True)
-                self._dms(build, tag)
+                self._dms(build, tag, ev, trade=True)
             return
 
         if t == "SCAN":
@@ -519,6 +544,7 @@ class Publisher:
             return
         _day(st, now)
         self._queue = st.setdefault("channel_queue", [])
+        self._dm_queue = st.setdefault("dm_queue", [])
         for ev in sorted(events, key=lambda e: e.get("seq", 0)):
             if ev.get("seq", 0) <= st["seq"]:
                 continue
@@ -526,6 +552,7 @@ class Publisher:
             st["seq"] = ev["seq"]
             _save(STATE, st)
         self.flush_channel(st, now)
+        self.flush_dms(st, now)
         _save(STATE, st)
         self.notices(now)
 
@@ -657,8 +684,9 @@ def welcome_text(first_name: str, channel: str) -> str:
         record = (f"Our record over {s['trades']} trades: a losing trade cost ₹{abs(s['avg_loss']):,.0f} per lot on "
                   f"average; the worst cost ₹{abs(s['worst']):,.0f}.\n")
     return (f"👋 Welcome{', ' + html.escape(first_name) if first_name else ''}!\n\n"
-            f"I send you every trade of our Nifty option-selling algo the moment it happens — entries, adds, "
-            f"bookings and exits — sized for you, with your P&L.\n"
+            f"I send you every trade of our Nifty option-selling algo — entries, adds, bookings and exits — "
+            f"sized for you, with your P&L. During your free month they arrive 5 minutes after each trade, "
+            f"so you can watch the algo at work; subscribers get them live.\n"
             + (f"The public feed is {channel}.\n" if channel else "")
             + "\n<b>Pick your size by your trading capital</b>\n"
               "• <b>₹2 lakh → Small · 1 lot</b> on every trade.\n"
