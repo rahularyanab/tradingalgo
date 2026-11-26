@@ -136,8 +136,10 @@ def _fit(text: str) -> str:
     if _weight(text) <= MAX_LEN:
         return text
     text = "\n".join(l for l in text.split("\n") if not l.startswith("#"))
-    while _weight(text) > MAX_LEN:
-        text = text[:-2]
+    if _weight(text) <= MAX_LEN:
+        return text                                   # dropping the hashtags was enough: no "…"
+    while _weight(text) > MAX_LEN - 1:
+        text = text[:-1]
     return text.rstrip() + "…"
 
 
@@ -158,8 +160,9 @@ def is_market_day(d: date, holidays: Optional[set] = None) -> bool:
 def greeting_text(d: date) -> str:
     return _fit(
         f"☀️ Good morning — {_day_label(d)}\n"
-        f"Nifty option-selling algo, live from 10:00. Follow {HANDLE} for every entry, exit & P&L.\n"
+        f"Nifty option-selling algo, live from 10:00. Follow {HANDLE} for every entry & exit.\n"
         f"Size: 3 lots strong · 2 moderate · 1/leg strangle\n"
+        f"Real-time + 1-lot alerts: ThetaDeskIN on Telegram\n"   # plain text: no link fee, no @-tag
         f"First scan 9:15\n{HASHTAGS}")
 
 

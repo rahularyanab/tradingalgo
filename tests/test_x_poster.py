@@ -101,6 +101,11 @@ at(2026, 11, 27, 9, 0); tick()
 at(2026, 11, 27, 9, 5); tick()
 check("9:00 greeting, once, explains the fixed sizes", len(SENT) == 1 and SENT[0][0] == "09:00" and "Follow @ThetaDeskIN" in SENT[0][1]
       and "Size: 3 lots strong · 2 moderate · 1/leg strangle" in SENT[0][1] and SENT[0][1].endswith(xp.HASHTAGS), SENT)
+check("greeting names the Telegram channel as plain text (no link fee, no @-tag of a stranger)",
+      "Real-time + 1-lot alerts: ThetaDeskIN on Telegram" in SENT[0][1] and "t.me" not in SENT[0][1]
+      and "@ThetaDeskINbot" not in SENT[0][1] and "…" not in SENT[0][1], SENT[0][1])
+check("_fit: dropping hashtags is enough → no stray '…'", xp._fit("a" * 270 + "\n" + "#x" * 10) == "a" * 270)
+check("_fit: still too long → cut to 280 with '…'", len(xp._fit("x" * 300)) == 280 and xp._fit("x" * 300).endswith("…"))
 at(2026, 11, 27, 9, 15); scan(); tick()
 at(2026, 11, 27, 9, 30); scan("STRANGLE"); tick()                # second pre-10:00 scan: not posted
 check("9:15 first scan, once", len(SENT) == 2 and "First scan 09:15" in SENT[1][1]
