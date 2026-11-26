@@ -91,11 +91,34 @@ class FakeSsh:
         return 0, ""
 
 
+class FakeLocal:
+    def __init__(self):
+        self.env, self.running, self.calls, self.logs = {}, set(), [], {}
+
+    def write_env(self, cid, text):
+        self.env[cid] = text
+
+    def start(self, cid):
+        self.running.add(cid); self.calls.append(("start", cid))
+
+    def stop(self, cid):
+        self.running.discard(cid); self.calls.append(("stop", cid))
+
+    def log(self, cid):
+        return self.logs.get(cid, "")
+
+    def remove(self, cid):
+        self.stop(cid); self.env.pop(cid, None); self.calls.append(("remove", cid))
+
+
 SENT = []
 notify = lambda cid, text, markup: SENT.append((str(cid), text, markup))
-do, ssh = FakeDO(), FakeSsh()
-FL.ssh_factory = lambda: ssh                       # the bot's /golive etc. use the fake too
-fleet = FL.Fleet(do, ssh, notify, {"max": 3, "setup_base": "https://setup.example"}, clock=lambda: CLOCK[0])
+do, ssh, local = FakeDO(), FakeSsh(), FakeLocal()
+FL.ssh_factory = lambda: ssh                       # the bot's /golive etc. use the fakes too
+FL.local_factory = lambda: local
+fleet = FL.Fleet(do, ssh, notify, {"max": 3, "local_max": 2, "setup_base": "https://setup.example"},
+                 clock=lambda: CLOCK[0], local=local)
+FL.settings = lambda: {"do_token": "", "max": 3, "local_max": 2, "setup_base": ""}      # no DO token / domain yet
 FL.SUBS.write_text(json.dumps({"501": {"name": "Asha", "plan": "small", "username": "asha_k",
                                         "paid_until": "2027-01-01T18:00:00+05:30", "trial_until": "2026-11-20T00:00:00+05:30"},
                                 "502": {"name": "Ravi", "plan": "standard", "trial_until": "2026-12-20T00:00:00+05:30"}}))
@@ -108,10 +131,61 @@ ST = {"owner_id": "900", "channel": "@c"}
 txt, _ = T.reply_for("/autotrade ravi zerodha", "900", "Rahul", ST, "", send)
 check("/autotrade refuses a trial-only member", "isn't on paid access" in txt and not FL.load())
 txt, _ = T.reply_for("/autotrade asha zerodha", "900", "Rahul", ST, "", send)
-check("/autotrade on a paid member: requested, member told", FL.load()["501"]["state"] == "requested"
-      and side[-1][0] == "501" and "your own trading server" in side[-1][1], txt)
+check("/autotrade on a paid member: a PAPER TRIAL on this server, no droplet", FL.load()["501"]["state"] == "local_requested"
+      and "paper trial" in txt, txt)
 txt, _ = T.reply_for("/autotrade asha zerodha", "501", "Asha", ST, "asha_k", send)
-check("members can't run /autotrade", "🖥" not in txt)
+check("members can't run /autotrade", "🧪" not in txt)
+
+print("paper trial on the main server")
+at(1, 18, 0); fleet.tick()
+r = FL.load()["501"]
+env = local.env.get("501", "")
+check("trial started: no DigitalOcean call at all", r["state"] == "local_paper" and do.calls == [] and "501" in local.running)
+check("…PAPER, no broker login, prices from the owner's existing session", "MODE=paper" in env and "BROKER=paper" in env
+      and "QUOTES_TOKEN_FILE=" in env and "KITE_API_KEY=" in env and "ZERODHA_PASSWORD" not in env, env)
+k0 = re.search(r"^EXEC_API_KEY=(.*)$", env, re.M).group(1)
+check("…its own key (hash stored, key only in its settings)", json.loads(FL.SUBS.read_text())["501"]["exec_key_sha256"] == EA.hash_key(k0))
+check("…member told: nothing needed from them, evening summaries",
+      any(m[0] == "501" and "nothing needed from you" in m[1] for m in SENT))
+subs0 = json.loads(FL.SUBS.read_text())
+subs0.update({"503": {"name": "Meera", "plan": "standard", "paid_until": "2027-01-01T00:00:00+05:30"},
+              "504": {"name": "Dev", "plan": "small", "paid_until": "2027-01-01T00:00:00+05:30"}})
+FL.SUBS.write_text(json.dumps(subs0))
+FL.request("503", "angel"); FL.request("504", "zerodha")
+fleet.tick()
+st3, st4 = FL.load()["503"]["state"], FL.load()["504"]
+check("trial cap (LOCAL_MAX=2): the third waits with a clear reason", st3 == "local_paper" and st4["state"] == "local_requested"
+      and "LOCAL_MAX" in st4["error"], (st3, st4))
+local.logs["501"] = ("2026-12-02 10:00:05,2  INFO     [PAPER] SELL NIFTY26D0826000CE x65 @ 180.0\n"
+                     "2026-12-02 10:00:05,1  INFO     [PAPER] BUY NIFTY26D0827050CE x65 @ 5.0\n"
+                     "2026-12-02 14:45:02,1  INFO     [PAPER] BUY NIFTY26D0826000CE x65 @ 151.25\n"
+                     "2026-12-02 14:45:02,2  INFO     [PAPER] SELL NIFTY26D0827050CE x65 @ 2.9\n"
+                     "2026-12-02 14:45:03,1  INFO     #9 BUY back NIFTY26D0826000CE 65/65 (PROFIT_LOCK)\n")
+at(2, 15, 55); fleet.tick()
+tsum = [m for m in SENT if m[0] == "501" and "Paper day" in m[1]]
+check("15:50 trial summary from the local log, with the go-live button", tsum and "+₹1,732" in tsum[-1][1]
+      and tsum[-1][2]["inline_keyboard"][0][0]["callback_data"] == "fleet:live", tsum[-1:] or SENT[-1])
+txt, _ = T.reply_for("/golive asha", "900", "Rahul", ST, "", send)
+check("/golive without DO token + domain: explained, trial keeps running", "needs a DigitalOcean token" in txt
+      and "domain" in txt and FL.load()["501"]["state"] == "local_paper" and "501" in local.running, txt)
+subs0 = json.loads(FL.SUBS.read_text()); subs0["503"]["paid_until"] = "2026-12-02T09:00:00+05:30"; FL.SUBS.write_text(json.dumps(subs0))
+fleet.tick()
+check("trial member lapses → their paper executor stops", FL.load()["503"]["state"] == "off_local" and "503" not in local.running)
+subs0["503"]["paid_until"] = "2027-01-01T00:00:00+05:30"; FL.SUBS.write_text(json.dumps(subs0))
+at(3, 9, 0); fleet.tick()
+check("pays again → trial resumes", FL.load()["503"]["state"] == "local_paper" and "503" in local.running)
+subs0["503"]["paid_until"] = "2026-12-03T10:00:00+05:30"; FL.SUBS.write_text(json.dumps(subs0))
+at(3, 11, 0); fleet.tick(); at(10, 11, 1); fleet.tick()
+check("off 7 days → trial removed", FL.load()["503"]["state"] == "deleted" and ("remove", "503") in local.calls)
+for cid in ("503", "504"):                                   # keep the rest of this file about 501 only
+    with FL.locked():
+        f_ = FL.load(); f_.pop(cid, None); FL.save(f_)
+at(1, 18, 0)
+FL.settings = lambda: {"do_token": "x", "max": 3, "local_max": 2, "setup_base": "https://setup.example"}
+txt, _ = T.reply_for("/golive asha", "900", "Rahul", ST, "", send)
+check("/golive with both: trial stopped, own server requested, member told", FL.load()["501"]["state"] == "requested"
+      and "501" not in local.running and side[-1][0] == "501" and "your own trading server" in side[-1][1], txt)
+
 
 # ── 2. the worker builds it ───────────────────────────────────────────────────
 print("server lifecycle")
@@ -209,15 +283,18 @@ ssh.log = ("2026-12-02 10:00:04,1  INFO     #7 BUY hedge NIFTY26D0827050CE 65/65
            "2026-12-02 14:45:02,2  INFO     [PAPER] SELL NIFTY26D0827050CE x65 @ 2.9\n"
            "2026-12-02 14:45:03,1  INFO     #9 BUY back NIFTY26D0826000CE 65/65 (PROFIT_LOCK)\n"
            "2026-12-02 14:45:03,2  INFO     P1: flat\n")
+with FL.locked():                                          # its trial already had a summary on 2 Dec in this test
+    f_ = FL.load(); f_["501"].pop("last_summary", None); FL.save(f_)
+mark = len(SENT)
 at(2, 15, 0); fleet.tick()
-check("no summary before 15:50", not any("Paper day" in m[1] for m in SENT))
+check("no summary before 15:50", not any("Paper day" in m[1] for m in SENT[mark:]))
 at(2, 15, 51); fleet.tick()
-summ = [m for m in SENT if "Paper day" in m[1]]
+summ = [m for m in SENT[mark:] if "Paper day" in m[1]]
 check("15:50 paper summary: actions + simulated P&L (+₹1,732) + go-live button", len(summ) == 1 and "+₹1,732" in summ[0][1]
       and "#9 BUY back" in summ[0][1] and summ[0][2]["inline_keyboard"][0][0]["callback_data"] == "fleet:live",
       summ[0][1] if summ else SENT[-1])
 at(2, 16, 30); fleet.tick()
-check("only once a day", len([m for m in SENT if "Paper day" in m[1]]) == 1)
+check("only once a day", len([m for m in SENT[mark:] if "Paper day" in m[1]]) == 1)
 ans = T.on_callback("fleet:live", "501", ST, send)
 check("'ready to go live' → owner gets /golive with their id", "quick check" in ans and side[-1][0] == "900" and "/golive 501" in side[-1][1])
 ans = T.on_callback("fleet:call", "501", ST, send)
@@ -260,7 +337,7 @@ check("off 7 days: droplet deleted, owner told", FL.load()["501"]["state"] == "d
 print("budget and bundle")
 do.n = 3
 subs["502"]["paid_until"] = "2027-01-01T00:00:00+05:30"; FL.SUBS.write_text(json.dumps(subs))
-FL.request("502", "angel")
+FL.request("502", "angel", local=False)                    # straight to an own droplet
 fleet.tick()
 check("droplet budget reached → nothing created, error shown in /fleet", FL.load()["502"]["state"] == "requested"
       and "budget" in FL.load()["502"]["error"] and not any(c[0] == "create" and "502" in c[1] for c in do.calls))

@@ -5,6 +5,9 @@ Runs as its OWN process (systemd: fleet.service):   venv/bin/python -m publish.f
 
 Life of a subscriber's server (state in logs/fleet.json, one record per Telegram chat id):
 
+  /autotrade ──► local_paper  (free PAPER trial on the MAIN server: no droplet, no logins, no orders)
+                      │  member taps "ready to go live" → owner /golive → promote()
+                      ▼
   requested ──► creating ──► installing ──► awaiting_broker ──► paper ──► live
    (/autotrade)   droplet      code + key,      guide + setup      daily      owner
                   created      PAPER mode       link sent          summary    approved
@@ -64,6 +67,9 @@ SETUP_DAYS = 3
 SUMMARY_AT = dtime(15, 50)
 REMOTE_CODE, REMOTE_HOME = "/opt/thetadesk-executor", "/opt/executor"
 ACTIVE = ("awaiting_broker", "paper", "live")
+LOCAL = ("local_requested", "local_paper")              # paper trial on the MAIN server, before any droplet
+MEMBERS_DIR: Path = _paths.ROOT / "executor_members"
+OWNER_ENV: Path = _paths.ROOT / ".env"
 
 
 def now_ist() -> datetime:
@@ -84,6 +90,7 @@ def _read_env(path: Path) -> dict:
 def settings() -> dict:
     v = _read_env(ENV_FILE)
     return {"do_token": v.get("DO_TOKEN", ""), "max": int(v.get("FLEET_MAX") or 10),
+            "local_max": int(v.get("LOCAL_MAX") or 3),
             "setup_base": (v.get("SETUP_BASE_URL") or "").rstrip("/")}
 
 
@@ -130,8 +137,9 @@ def hash_token(t: str) -> str:
     return hashlib.sha256(t.encode()).hexdigest()
 
 
-def request(cid: str, broker: str, now: Optional[datetime] = None) -> dict:
-    """Owner asked for an auto-trading server for this subscriber (/autotrade). Idempotent."""
+def request(cid: str, broker: str, now: Optional[datetime] = None, local: bool = True) -> dict:
+    """Owner asked for auto-trading for this subscriber (/autotrade). Starts with a free PAPER trial on the
+    main server (local=True); their own droplet comes only when they go live. Idempotent."""
     now = now or now_ist()
     with locked():
         fleet = load()
@@ -140,8 +148,8 @@ def request(cid: str, broker: str, now: Optional[datetime] = None) -> dict:
             rec["broker"] = broker
             save(fleet)
             return rec
-        rec = fleet[cid] = {"state": "requested", "broker": broker, "requested": now.isoformat(timespec="seconds"),
-                            "history": [], "attempts": 0}
+        rec = fleet[cid] = {"state": "local_requested" if local else "requested", "broker": broker,
+                            "requested": now.isoformat(timespec="seconds"), "history": [], "attempts": 0}
         save(fleet)
         return rec
 
@@ -226,6 +234,56 @@ class Ssh:
         p = subprocess.run(["rsync", "-a", "--delete", "--exclude", "venv", "-e", "ssh " + " ".join(self._base()),
                             f"{local_dir}/", f"root@{ip}:{remote_dir}/"], capture_output=True, text=True, timeout=300)
         return p.returncode, (p.stdout + p.stderr)[-2000:]
+
+
+class LocalHost:
+    """Paper executors for trial members on the MAIN server (systemd executor-member@<cid>). They use the
+    owner's existing Zerodha session for prices only and never place an order."""
+
+    def __init__(self, root: Optional[Path] = None):
+        self.root = root or MEMBERS_DIR
+
+    @staticmethod
+    def unit(cid: str) -> str:
+        return f"executor-member@{re.sub(r'[^A-Za-z0-9_-]', '', cid)}.service"
+
+    def home(self, cid: str) -> Path:
+        return self.root / re.sub(r"[^A-Za-z0-9_-]", "", cid)
+
+    def write_env(self, cid: str, text: str) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.root, 0o700)
+        h = self.home(cid)
+        h.mkdir(exist_ok=True)
+        f = h / "executor.env"
+        f.write_text(text)
+        os.chmod(f, 0o600)
+
+    def _ctl(self, *args) -> None:
+        p = subprocess.run(["systemctl", *args], capture_output=True, text=True, timeout=60)
+        if p.returncode != 0:
+            raise RuntimeError(f"systemctl {' '.join(args)}: {p.stderr.strip()[-200:]}")
+
+    def start(self, cid: str) -> None:
+        self._ctl("enable", "--now", self.unit(cid))
+
+    def stop(self, cid: str) -> None:
+        self._ctl("disable", "--now", self.unit(cid))
+
+    def log(self, cid: str) -> str:
+        f = self.home(cid) / "executor.log"
+        return "\n".join(f.read_text().splitlines()[-600:]) if f.exists() else ""
+
+    def remove(self, cid: str) -> None:
+        try:
+            self.stop(cid)
+        finally:
+            shutil.rmtree(self.home(cid), ignore_errors=True)
+
+
+def local_factory():
+    """The local-host helper the bot uses (tests swap it for a fake)."""
+    return LocalHost()
 
 
 def ssh_factory():
@@ -341,8 +399,9 @@ def summarise_log(log: str, day: str) -> tuple[list, Optional[float]]:
 
 class Fleet:
     def __init__(self, do: Optional[DO], ssh, notify: Callable, cfg: dict, clock: Callable[[], datetime] = now_ist,
-                 bundle: Callable[[], Path] = build_bundle):
+                 bundle: Callable[[], Path] = build_bundle, local: Optional[LocalHost] = None):
         self.do, self.ssh, self.notify, self.cfg, self.clock, self.bundle = do, ssh, notify, cfg, clock, bundle
+        self.local = local or LocalHost()
 
     def owner(self, text: str) -> None:
         owner = _read_env(TG_ENV).get("TG_OWNER_ID")
@@ -377,7 +436,7 @@ class Fleet:
                     fleet[cid] = {**fleet[cid], **{k: v for k, v in snapshot.items()}}
                 elif cid in fleet:
                     # the setup page or the bot moved it on meanwhile: keep theirs, add our technical fields only
-                    for k in ("droplet_id", "ip", "error", "retry_at", "attempts", "last_summary", "off_at"):
+                    for k in ("droplet_id", "ip", "error", "retry_at", "attempts", "last_summary"):
                         if k in snapshot:
                             fleet[cid][k] = snapshot[k]
                 save(fleet)
@@ -388,6 +447,43 @@ class Fleet:
         sub = subs.get(cid, {})
         paid = EA.paid_at(sub, now, False)
         st = rec["state"]
+
+        if st == "local_requested":
+            busy = sum(1 for c, r in load().items() if c != cid and r["state"] in ("local_paper",))
+            if busy >= self.cfg.get("local_max", 3):
+                raise RuntimeError(f"{busy} paper trials already running on the main server (LOCAL_MAX)")
+            key, digest = EA.new_key()
+            kite_key = _read_env(OWNER_ENV).get("KITE_API_KEY", "")
+            self.local.write_env(cid, env_text(key, creds={"KITE_API_KEY": kite_key,
+                                                           "QUOTES_TOKEN_FILE": str(_paths.OWNER_TOKEN_FILE)}))
+            subs = _subs()
+            if cid in subs:
+                subs[cid].update(exec_key_sha256=digest, exec_key_created=now.isoformat(timespec="seconds"),
+                                 exec_since=now.isoformat(timespec="seconds"))
+                _save_subs(subs)
+            self.local.start(cid)
+            set_state(rec, "local_paper", now, "paper trial on the main server")
+            self.notify(cid, ("✅ <b>Your paper trading is set up.</b>\nFrom the next market day it follows every trade at your "
+                              "plan size — <b>no real orders, nothing needed from you</b>. Each evening you'll get a summary "
+                              "of what it did. When you're confident, tap <b>I'm ready to go live</b> under a summary."), None)
+            self.owner(f"🧪 Fleet: paper trial started for {sub.get('name') or cid} on the main server.")
+            return
+
+        if st == "local_paper" and not paid:
+            self.local.stop(cid)
+            rec["off_at"] = now.isoformat(timespec="seconds")
+            set_state(rec, "off_local", now, "access lapsed")
+            self.owner(f"⏸ Fleet: {sub.get('name') or cid}'s paper trial stopped (access lapsed).")
+            return
+
+        if st == "off_local":
+            if paid:
+                self.local.start(cid)
+                set_state(rec, "local_paper", now, "access renewed")
+            elif now - datetime.fromisoformat(rec["off_at"]) >= timedelta(days=OFF_DAYS):
+                self.local.remove(cid)
+                set_state(rec, "deleted", now, f"after {OFF_DAYS} days off")
+            return
 
         if st == "requested":
             if not self.do:
@@ -469,23 +565,49 @@ class Fleet:
             set_state(rec, rec.get("was") or "paper", now, "access renewed")
             return
 
-        if st in ("paper", "live") and now.time() >= SUMMARY_AT and now.weekday() < 5 \
+        if st in ("paper", "live", "local_paper") and now.time() >= SUMMARY_AT and now.weekday() < 5 \
                 and rec.get("last_summary") != now.date().isoformat():
-            rc, log = self.ssh.run(rec["ip"], f"tail -n 600 {REMOTE_HOME}/executor.log", timeout=60)
-            actions, pnl = summarise_log(log if rc == 0 else "", now.date().isoformat())
+            if st == "local_paper":
+                log = self.local.log(cid)
+            else:
+                rc, log = self.ssh.run(rec["ip"], f"tail -n 600 {REMOTE_HOME}/executor.log", timeout=60)
+                log = log if rc == 0 else ""
+            actions, pnl = summarise_log(log, now.date().isoformat())
             rec["last_summary"] = now.date().isoformat()
-            label = "Paper day" if st == "paper" else "Your day"
+            label = "Your day" if st == "live" else "Paper day"
             if not actions:
                 text = f"📋 <b>{label}</b> — no trades today."
             else:
                 text = (f"📋 <b>{label}</b> — what your server did today:\n" + "\n".join(f"• {a[:120]}" for a in actions[-12:])
                         + (f"\n\nPaper P&L: <b>{'+' if pnl >= 0 else '−'}₹{abs(pnl):,}</b> (simulated, before charges)" if pnl is not None else ""))
             markup = ({"inline_keyboard": [[{"text": "🚀 I'm ready to go live (1 lot)", "callback_data": "fleet:live"}]]}
-                      if st == "paper" else None)
+                      if st in ("paper", "local_paper") else None)
             self.notify(cid, text, markup)
 
 
 # ── actions used by the bot and the setup page ───────────────────────────────
+
+def promote(cid: str, local: Optional[LocalHost] = None, now: Optional[datetime] = None) -> str:
+    """A trial member is going live: stop their paper trial on the main server and start their own droplet
+    (guide → setup page → connected → owner /golive). Needs the DO token and the setup page's domain."""
+    now = now or now_ist()
+    cfg = settings()
+    missing = [n for n, ok in (("a DigitalOcean token (DO_TOKEN)", cfg["do_token"]),
+                               ("the setup page's domain (SETUP_BASE_URL)", cfg["setup_base"])) if not ok]
+    if missing:
+        return "can't move them to their own server yet — fleet.env needs " + " and ".join(missing)
+    with locked():
+        fleet = load()
+        rec = fleet.get(cid)
+        if not rec or rec["state"] != "local_paper":
+            return f"they're not on a paper trial ({rec['state'] if rec else 'nothing set up'})"
+    (local or local_factory()).stop(cid)
+    with locked():
+        fleet = load()
+        set_state(fleet[cid], "requested", now, "going live: own server")
+        save(fleet)
+    return "ok"
+
 
 def set_mode(cid: str, ssh, mode: str, cap_lots: Optional[int], now: Optional[datetime] = None) -> str:
     """Switch a subscriber's server between paper and live, optionally capping every leg at `cap_lots`

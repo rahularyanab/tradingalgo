@@ -711,9 +711,9 @@ OWNER_HELP = ("👑 <b>Owner commands</b>\n"
               "/revoke &lt;who&gt; — end access now\n"
               "/msg &lt;who&gt; &lt;text&gt; — message someone through the bot\n"
               "/key &lt;who&gt; — auto-trading key for a paid member (new key each time; 'off' removes it)\n"
-              "/autotrade &lt;who&gt; zerodha|angel — set up their own trading server (paper first)\n"
+              "/autotrade &lt;who&gt; zerodha|angel — start their free PAPER trial (on this server, no logins)\n"
               "/fleet — every trading server and its stage\n"
-              "/golive &lt;who&gt; — switch their server to LIVE, capped at 1 lot\n"
+              "/golive &lt;who&gt; — trial → their own server (guide + setup page); own server → LIVE at 1 lot\n"
               "/fullsize &lt;who&gt; — lift the 1-lot cap (their full plan size)\n"
               "/paper &lt;who&gt; — back to paper mode\n"
               "&lt;who&gt; = chat id, @username or the start of their name")
@@ -826,13 +826,17 @@ def owner_command(cmd: str, args: list, subs: dict, now: datetime, settings: dic
         if A.status(sub, now) != "paid":
             return f"{name} isn't on paid access — record the payment with /paid first."
         rec = FL.request(cid, broker, now)
-        send(cid, ("🛠 We're setting up <b>your own trading server</b> now. In a few minutes I'll send you a short "
-                   "step-by-step guide to connect your " + ("Zerodha" if broker == "zerodha" else "Angel One") +
-                   " account. Nothing will trade until you've seen it work on paper."), None)
-        return (f"🖥 {name}: server {'requested' if rec['state'] == 'requested' else rec['state']} ({broker}). "
-                f"I'll message you when it's ready. Track it with /fleet.")
+        return (f"🧪 {name}: paper trial {'starting' if rec['state'] == 'local_requested' else rec['state']} on this server "
+                f"({broker} later). They'll be told when it's ready. Track it with /fleet.")
     if cmd in ("/golive", "/fullsize", "/paper"):
         from publish import fleet as FL
+        if cmd == "/golive" and (FL.load().get(cid) or {}).get("state") == "local_paper":
+            res = FL.promote(cid, FL.local_factory(), now)
+            if res != "ok":
+                return f"⚠️ {name}: {html.escape(res)}"
+            send(cid, ("🚀 <b>Let's get you live.</b> We're setting up <b>your own trading server</b> now. In a few minutes "
+                       "I'll send a short step-by-step guide to connect your broker account."), None)
+            return f"🖥 {name}: paper trial ended; their own server is being created. Track it with /fleet."
         mode, cap = {"/golive": ("live", 1), "/fullsize": ("live", None), "/paper": ("paper", None)}[cmd]
         res = FL.set_mode(cid, FL.ssh_factory(), mode, cap, now)
         if res != "ok":
