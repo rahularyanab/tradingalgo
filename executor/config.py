@@ -35,6 +35,7 @@ class Settings:
     entry_from: str = "09:15"
     entry_until: str = "14:55"
     poll_sec: float = 2.0
+    quotes_token_file: str = ""             # paper only: real prices from an existing Zerodha token file
     creds: dict = field(default_factory=dict)
 
     @property
@@ -71,5 +72,6 @@ def load(home: Path | None = None) -> Settings:
         product=v.get("PRODUCT", "NRML"), disaster_sl_pct=num("DISASTER_SL_PCT", 60.0),
         max_lots_per_leg=num("MAX_LOTS_PER_LEG", 12, int), stale_open_sec=num("STALE_OPEN_SEC", 120, int),
         guard_grace_sec=num("GUARD_GRACE_SEC", 120, int), poll_sec=num("POLL_SEC", 2.0),
+        quotes_token_file=v.get("QUOTES_TOKEN_FILE", ""),
         creds={k: v[k] for k in cred_keys if v.get(k)},
     )

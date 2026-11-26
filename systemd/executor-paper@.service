@@ -1,0 +1,20 @@
+[Unit]
+Description=Executor PAPER test (%i) — follows the executor API, never sends an order
+After=network-online.target executor-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/trading-algo
+Environment=EXECUTOR_HOME=/opt/trading-algo/executor_paper/%i
+ExecStart=/opt/trading-algo/venv/bin/python -m executor run
+Restart=always
+RestartSec=20
+MemoryMax=80M
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=executor-paper-%i
+
+[Install]
+WantedBy=multi-user.target

@@ -26,3 +26,6 @@ tg.env
 
 # Executor API TLS key + certificate (server only)
 exec_tls/
+
+# paper executor test homes (keys inside)
+executor_paper/

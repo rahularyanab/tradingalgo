@@ -23,7 +23,22 @@ def _client(s):
         return kite_client(s.creds)
     if s.broker == "angel":
         return angel_client(s.creds, s.home)
+    if s.quotes_token_file and s.creds.get("KITE_API_KEY"):
+        return _quotes_only(s)                               # paper with real prices, no login of its own
     return None
+
+
+def _quotes_only(s):
+    """Paper mode with real prices from an EXISTING Zerodha session (today's token file), so testing never
+    creates a second login. Read-only use: PaperVenue never sends an order."""
+    import json
+    from kiteconnect import KiteConnect
+    tok = json.loads(open(s.quotes_token_file).read())
+    if tok.get("date") != date.today().isoformat():
+        raise RuntimeError(f"{s.quotes_token_file} is not from today yet (Zerodha login runs at 08:45)")
+    k = KiteConnect(api_key=s.creds["KITE_API_KEY"])
+    k.set_access_token(tok["access_token"])
+    return k
 
 
 def _venue(s, client):

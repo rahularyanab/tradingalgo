@@ -334,5 +334,20 @@ check("missing broker credentials are listed, live mode recognised", s.live and 
 (home / "executor.env").write_text("EXEC_API_KEY=tdx_abc\nEXEC_API_PIN=" + "a" * 64 + "\nBROKER=paper\nMODE=live\n")
 check("live mode with no broker is refused", "MODE=live needs BROKER=zerodha or angel" in C.load(home).problems())
 
+import executor.__main__ as M
+(home / "executor.env").write_text("EXEC_API_KEY=tdx_abc\nEXEC_API_PIN=" + "a" * 64 + "\nBROKER=paper\nMODE=paper\n"
+                                   f"KITE_API_KEY=k\nQUOTES_TOKEN_FILE={home / 'tok.json'}\n")
+(home / "tok.json").write_text(json.dumps({"date": "2000-01-01", "access_token": "x"}))
+s = C.load(home)
+try:
+    M._client(s); stale = False
+except RuntimeError as ex:
+    stale = "not from today" in str(ex)
+check("paper with real quotes: refuses yesterday's token (no second login, ever)", stale and s.problems() == [])
+(home / "tok.json").write_text(json.dumps({"date": __import__("datetime").date.today().isoformat(), "access_token": "x"}))
+c = M._client(s)
+check("…today's token → a quotes client; the venue stays PAPER", type(M._venue(s, c)).__name__ == "PaperVenue"
+      and c.access_token == "x")
+
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 sys.exit(1 if FAIL else 0)
