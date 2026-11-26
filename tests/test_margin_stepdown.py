@@ -99,6 +99,11 @@ main.send_signal = lambda *a, **k: None
 main._is_market_open = lambda: True
 main._entry_allowed = lambda: True
 main._STATE_FILE = TMP / "main_state.json"
+# run_scan applies the "from 14:00 entries are half size" rule with the REAL clock, so after 14:00 these
+# 3-lot entries became 1 lot and ~26 checks failed. This file tests margin step-down, not late sizing:
+# pin that rule's clock to a morning time so the results don't depend on when the test is run.
+_real_late_sizing = main._apply_late_entry_sizing
+main._apply_late_entry_sizing = lambda final, now=None: _real_late_sizing(final, now=now or datetime(2026, 10, 19, 11, 0))
 alerts = []
 
 
