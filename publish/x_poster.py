@@ -26,11 +26,11 @@ Safe by default:
   * Hourly lines older than SNAPSHOT_MAX_AGE are skipped; late trade posts say "(delayed)".
   * No links in posts (X charges far more for a post with a URL).
   * MODEL SIZE, not the owner's fills: every trade is shown at a fixed size by signal grade
-    (MODEL_LOTS: STRONG 3, MODERATE 2, STRANGLE 2 per leg). Its ₹ = the real trade's P&L per
-    starting lot × model lots, so margin step-downs, the 14:00 half-size rule and profit-lock
-    cuts never change what followers see; adds and bookings scale in proportion. Every ₹ figure
-    is rounded to whole rupees before it is added up, so a day = the sum of its trade posts and
-    a month = the sum of its days.
+    (STRONG 3, MODERATE 2, STRANGLE 2 per leg), so margin step-downs, the 14:00 half-size rule
+    and profit-lock cuts never change what followers see. Its ₹ come from publish/follow.py — the
+    same whole-lot ledger the Telegram channel uses — i.e. what a follower really makes following
+    the posts in whole lots. Every ₹ figure is rounded to whole rupees before it is added up, so a
+    day = the sum of its trade posts and a month = the sum of its days.
 
 Credentials come from X_ENV_FILE (default /opt/trading-algo/x.env, chmod 600), never from the
 trading bot's .env:
@@ -55,6 +55,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 import paths as _paths
+from publish import follow as F
 
 logger = logging.getLogger("x_poster")
 
@@ -68,8 +69,7 @@ ENV_FILE = Path(os.environ.get("X_ENV_FILE", str(_paths.ROOT / "x.env")))
 HANDLE = os.environ.get("X_HANDLE", "@ThetaDeskIN")
 
 DAILY_CAP = 10
-MODEL_LOTS = {"STRONG": 3, "MODERATE": 2, "STRANGLE": 2}   # Rahul's choice 2026-11-26 (half his 6/4/4 config)
-MODEL_LOTS_DEFAULT = 2                                     # unknown grade (e.g. an entry logged without one)
+MODEL_LOTS = F.STANDARD                                    # STRONG 3 · MODERATE 2 · STRANGLE 2/leg (Rahul, 2026-11-26)
 POLL_SEC = 15
 GREETING_FROM, GREETING_UNTIL = dtime(9, 0), dtime(9, 15)
 SCAN_FROM, SCAN_UNTIL = dtime(9, 15), dtime(9, 45)
@@ -179,8 +179,7 @@ def scan_text(ev: dict) -> str:
 
 
 def model_lots(ev: dict) -> int:
-    return MODEL_LOTS.get(ev.get("strength") or "", MODEL_LOTS["STRANGLE"] if ev.get("structure") == "STRANGLE"
-                          else MODEL_LOTS_DEFAULT)
+    return F.lots_for(F.STANDARD, ev.get("strength"), ev.get("structure"))
 
 
 def _lots_word(n: int) -> str:
@@ -399,11 +398,11 @@ def _model_day(ev: dict, cur: dict) -> tuple[int, Optional[int]]:
     if not ev.get("position_open"):
         return booked, 0
     pos = cur.get("book", {}).get(ev.get("position_id") or "")
-    lots = (pos or {}).get("model_lots") or MODEL_LOTS_DEFAULT
-    if pos:
-        booked += round(pos["per_lot"] * lots)
-    open_pl = ev.get("open_per_start_lot")
-    return booked, (round(open_pl * lots) if open_pl is not None else None)
+    if not pos or "sizes" not in pos:
+        return booked, None
+    booked += round(F.realised(pos, "standard"))
+    ov = F.open_value(pos, "standard", ev.get("unrealised"))
+    return booked, (round(ov) if ov is not None else None)
 
 
 # ── the decision for one event ───────────────────────────────────────────────
@@ -419,8 +418,7 @@ def _handle(ev: dict, cur: dict, now: datetime, holidays: set, creds, live, post
     tag = f"seq {ev['seq']} {t}"
 
     if t == "ENTRY":
-        book[pid or "?"] = {"per_lot": 0.0, "start_lots": ev.get("entry_lots"), "announced": False,
-                            "model_lots": model_lots(ev)}
+        book[pid or "?"] = {**F.new_position(ev), "announced": False}
         # room for this entry AND its later exit, on top of the reserve
         if today_event and _room(cur, extra_reserved=1):
             if _send(entry_text(ev, age > LATE_AFTER), cur, creds, live, poster, tag):
@@ -430,19 +428,24 @@ def _handle(ev: dict, cur: dict, now: datetime, holidays: set, creds, live, post
             logger.warning(f"{tag}: not announced — daily cap would not leave room for its exit and the day close")
         return
 
+    if t == "ADD":
+        pos = book.get(pid) if pid else None
+        if pos and "sizes" in pos:
+            F.step(pos, ev)                                  # no post; the ledger follows the add
+        return
+
     if t == "EXIT":
         pos = book.get(pid) if pid else None
-        if pos and pos.get("start_lots") and ev.get("pnl") is not None:
-            per_lot = ev["pnl"] / pos["start_lots"]          # exact ₹ ÷ starting lots (no per-slice rounding)
-        else:
-            per_lot = ev.get("pnl_per_start_lot")
-        if pos is not None and per_lot is not None:
-            pos["per_lot"] += per_lot
+        if pos and "sizes" in pos:
+            F.step(pos, ev)                                  # whole-lot ledger, same as Telegram
         if not ev.get("position_closed"):
             return                                           # partial booking / one strangle leg: no post
-        result = pos["per_lot"] if pos is not None else per_lot
-        lots = (pos or {}).get("model_lots") or MODEL_LOTS_DEFAULT
-        result_rs = round(result * lots) if result is not None else None     # whole ₹: what the post shows
+        if pos and "sizes" in pos:
+            result_rs = round(F.realised(pos, "standard"))
+            lots = F.size_state(pos, "standard")["n"]
+        else:                                                # a position this poster never saw open
+            lots = MODEL_LOTS["MODERATE"]
+            result_rs = round(ev["points"] * F.LOT_SIZE * lots) if ev.get("points") is not None else None
         if today_event and result_rs is not None:
             day["trades"].append(result_rs)
         announced = bool(pos and pos.get("announced"))
@@ -494,7 +497,7 @@ def _handle(ev: dict, cur: dict, now: datetime, holidays: set, creds, live, post
         else:
             logger.info(f"{tag}: hourly skipped to keep room under the daily cap")
         return
-    # ADD and anything unknown: no post
+    # anything unknown: no post
 
 
 def run_once(creds: dict, live: bool, poster=post_to_x, now: Optional[datetime] = None) -> int:

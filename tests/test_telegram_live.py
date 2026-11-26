@@ -1,0 +1,250 @@
+"""
+Offline tests for the Telegram service (publish/telegram_live.py) and the shared whole-lot ledger
+(publish/follow.py). Nothing reaches Telegram or Zerodha: both are faked, the clock is simulated,
+and every file lives in a temp dir.
+
+The main scenario replays Rahul's REAL trades of 26 Nov 2026 (both entries were margin-cut to 2 lots):
+  10:30 CALL_SELL 26000 MODERATE, 2 lots @167.80 → 12:00 trailing lock, net −₹812
+  12:15 CALL_SELL 26000 STRONG,   2 lots @180.00 → 14:00 book 1 lot +₹5,346 → 14:45 last lot +₹1,732
+Run from the repo root:   python3 tests/test_telegram_live.py          (add -v to print messages)
+"""
+import json, os, sys, tempfile
+from dataclasses import replace
+from datetime import datetime
+from pathlib import Path
+from types import SimpleNamespace as NS
+
+sys.path.insert(0, os.getcwd())
+os.environ["TELEGRAM_BOT_TOKEN"] = os.environ["TELEGRAM_CHAT_ID"] = ""
+from publish import signal_feed as feed, x_poster as X, telegram_live as T, follow as F
+from signals.trade_monitor import TradeState
+
+VERBOSE = "-v" in sys.argv
+TMP = Path(tempfile.mkdtemp())
+LOT = feed.NIFTY_LOT_SIZE
+IST = X.IST
+PASS, FAIL = [], []
+CLOCK = [datetime(2026, 11, 27, 8, 0, tzinfo=IST)]
+feed._now = lambda: CLOCK[0]
+X.HOLIDAYS_FILE = TMP / "holidays.txt"
+X.HOLIDAYS_FILE.write_text("2026-12-25\n")
+CH = "@ThetaDeskLive"
+
+
+def check(name, cond, detail=""):
+    (PASS if cond else FAIL).append(name)
+    print(("  ok  " if cond else "  FAIL") + f"  {name}" + (f"   — {detail}" if detail and not cond else ""))
+
+
+class FakeTG(T.TG):
+    def __init__(self):
+        super().__init__("TEST")
+        self.username = "ThetaDeskBot"
+        self.sent, self.fail_next = [], {}
+
+    def call(self, method, **p):
+        if method == "sendMessage":
+            chat = str(p["chat_id"])
+            if self.fail_next.get(chat):
+                code = self.fail_next[chat].pop(0)
+                if not self.fail_next[chat]:
+                    del self.fail_next[chat]
+                return {"ok": False, "error_code": code, "description": "fake"}
+            self.sent.append((CLOCK[0].strftime("%H:%M"), chat, p["text"], p.get("reply_markup")))
+        return {"ok": True, "result": {}}
+
+
+def reset(tag, live=True):
+    feed.OUTBOX = T.OUTBOX = TMP / f"{tag}_outbox.jsonl"
+    feed.STATE = TMP / f"{tag}_feed.json"
+    T.STATE, T.SUBS, T.DRYRUN_LOG = TMP / f"{tag}_tg.json", TMP / f"{tag}_subs.json", TMP / f"{tag}_dry.log"
+    feed._mark = None
+    tg = FakeTG()
+    return tg, T.Publisher(tg, {"channel": CH, "live": live, "token": "TEST"})
+
+
+def at(d, hh, mm):
+    CLOCK[0] = datetime(2026, 11, d, hh, mm, tzinfo=IST) if d > 0 else CLOCK[0]
+
+
+def msgs(tg, chat):
+    """What the user reads: the HTML-escaped text as sent, with &amp; shown as &."""
+    return [m[2].replace("&amp;", "&") for m in tg.sent if m[1] == chat]
+
+
+def call_sell(lots, strike=26000, prem=180.0, hedge=27050, hprem=5.0, sl=26050):
+    return TradeState(action="CALL_SELL", strike=strike, symbol=f"NIFTY26D01{strike}CE", entry_time=CLOCK[0],
+                      entry_premium=prem, entry_spot=25945, sl_spot_level=sl, expiry="01-Dec-2026",
+                      lots=lots * LOT, hedge_symbol=f"NIFTY26D01{hedge}CE", hedge_strike=hedge, hedge_entry_premium=hprem)
+
+
+def subscribe(chat, plan, name="A"):
+    T.reply_for("/start", chat, name, {"channel": CH})
+    T.on_callback(f"plan:{plan}", chat)
+
+
+# ── 1. the shared ledger on its own ───────────────────────────────────────────
+print("whole-lot ledger")
+check("target: exact half rounds DOWN (book the extra lot)", F.target(3, 1, 2) == 1 and F.target(5, 1, 2) == 2)
+check("target: never below 1 while the owner holds", F.target(1, 1, 6) == 1 and F.target(2, 1, 6) == 1)
+check("target: 0 once the owner is flat", F.target(3, 0, 2) == 0)
+check("target: proportional adds", F.target(3, 12, 6) == 6 and F.target(2, 6, 4) == 3)
+
+# ── 2. Rahul's real day, through the channel and DMs ──────────────────────────
+print("real day: 26 Nov trades replayed on Fri 27 Nov")
+tg, pub = reset("real")
+at(27, 8, 0); pub.run_once(CLOCK[0])                             # service already running
+subscribe("111", "small", "Asha"); subscribe("222", "standard", "Ravi")
+at(27, 9, 15)
+feed.scan_result(NS(action="CALL_SELL", strength="MODERATE", score=2, pcr=0.84, resistance_level=25966,
+                    support_level=25680, call_wall=26000, put_wall=25500), 25917)
+pub.run_once(CLOCK[0])
+check("09:15 first scan → channel only", len(msgs(tg, CH)) == 1 and "First scan 09:15" in msgs(tg, CH)[0]
+      and not msgs(tg, "111"), msgs(tg, CH))
+
+at(27, 10, 30); t1 = call_sell(2, prem=167.80, hedge=27100, hprem=5.30, sl=26020)
+feed.trade_entry(t1, 25917, strength="MODERATE"); pub.run_once(CLOCK[0])
+ch = msgs(tg, CH)[-1]
+check("channel entry: moderate → 2 lots (owner filled 2 of 4)", "Sell <b>2 lots</b> 26000 CE @ ₹167.80" in ch
+      and "Hedge: buy <b>2 lots</b> 27100 CE" in ch and "above 26,020" in ch, ch)
+check("channel entry points to the bot for 1-lot + margin", "@ThetaDeskBot" in ch)
+check("small DM: 1 lot", "Sell <b>1 lot</b> 26000 CE" in msgs(tg, "111")[-1], msgs(tg, "111")[-1])
+check("standard DM: 2 lots", "Sell <b>2 lots</b> 26000 CE" in msgs(tg, "222")[-1])
+
+at(27, 12, 0); feed.trade_exit(t1, 172.80, -812.0, "PROFIT_LOCK", 25935); pub.run_once(CLOCK[0])
+ch = msgs(tg, CH)[-1]
+check("trade 1 closed: buy back 2 lots, −₹812 at 2 lots", "TRADE CLOSED" in ch and "Buy back <b>2 lots</b>" in ch
+      and "Trade result: <b>−₹812</b> (2 lots)" in ch, ch)
+check("small DM: −₹406 at 1 lot", "Trade result: <b>−₹406</b> (1 lot)" in msgs(tg, "111")[-1], msgs(tg, "111")[-1])
+
+at(27, 12, 15); t2 = call_sell(2)
+feed.trade_entry(t2, 25945, strength="STRONG"); pub.run_once(CLOCK[0])
+check("trade 2: strong → 3 lots on the channel (owner filled 2 of 6)", "Sell <b>3 lots</b> 26000 CE @ ₹180.00" in msgs(tg, CH)[-1]
+      and "strong signal" in msgs(tg, CH)[-1], msgs(tg, CH)[-1])
+
+at(27, 13, 15); feed.mark(6000.0, 25850); feed.pnl_snapshot(-812.0, t2); pub.run_once(CLOCK[0])
+ch = msgs(tg, CH)[-1]
+check("hourly: −₹812 booked + open 6000/2×3 = +₹9,000 → +₹8,188", "Day P&L: <b>+₹8,188</b>" in ch
+      and "Open +₹9,000" in ch, ch)
+
+at(27, 14, 0); feed.trade_exit(replace(t2, lots=1 * LOT), 96.20, 5346.0, "PROFIT_BOOK", 25780); pub.run_once(CLOCK[0])
+ch, small = msgs(tg, CH)[-1], msgs(tg, "111")[-1]
+check("owner books 1 of 2: channel books 2 of 3 (the extra lot), +₹10,692", "Buy back <b>2 lots</b>" in ch
+      and "Booked: +₹10,692" in ch and "<b>1 lot</b> still open" in ch, ch)
+check("small follower holds its single lot", "No action at your size — keep your 1 lot" in small, small)
+
+at(27, 14, 45); t2.lots = 1 * LOT; feed.trade_exit(t2, 151.25, 1732.0, "PROFIT_LOCK", 25908); pub.run_once(CLOCK[0])
+ch, small = msgs(tg, CH)[-1], msgs(tg, "111")[-1]
+check("trade 2 result at 3 lots: 2×5,346 + 1×1,732 = +₹12,424", "Trade result: <b>+₹12,424</b> (3 lots)" in ch, ch)
+check("small: closes its lot at the last exit, +₹1,732", "Buy back <b>1 lot</b>" in small and "+₹1,732</b> (1 lot)" in small, small)
+
+at(27, 15, 35); feed.pnl_snapshot(6266.0, None, label="CLOSE"); pub.run_once(CLOCK[0])
+ch = msgs(tg, CH)[-1]
+check("channel close: +₹11,612, 2 trades", "Day P&L: <b>+₹11,612</b>" in ch and "Trades: 2 · ✅ 1 · ❌ 1" in ch
+      and "Best +₹12,424 · Worst −₹812" in ch, ch)
+check("personal close (small): −406 + 1,732 = +₹1,326", "Your day" in msgs(tg, "111")[-1]
+      and "+₹1,326" in msgs(tg, "111")[-1], msgs(tg, "111")[-1])
+check("owner's real figures never shown (₹6,266 day, ₹7,078 trade)",
+      not any(x in m[2] for m in tg.sent for x in ("6,266", "7,078", "5,346</")))
+if VERBOSE:
+    print("\n" + "\n\n".join(f"[{a} → {c}]\n{t}" for a, c, t, _ in tg.sent) + "\n")
+
+# ── 3. X shows the same rupees as the channel ─────────────────────────────────
+print("X and Telegram agree")
+X.OUTBOX, X.CURSOR, X.DRYRUN_LOG = T.OUTBOX, TMP / "real_xcursor.json", TMP / "real_xdry.log"
+xsent = []
+CLOCK[0] = datetime(2026, 11, 27, 8, 0, tzinfo=IST)
+X.run_once({}, True, poster=lambda t, c: (xsent.append(t) or (True, False, "id")), now=CLOCK[0])
+X.CURSOR.write_text(json.dumps({"seq": 0, "book": {}, "history": {}}))       # replay today's outbox into X
+CLOCK[0] = datetime(2026, 11, 27, 15, 40, tzinfo=IST)
+X.run_once({}, True, poster=lambda t, c: (xsent.append(t) or (True, False, "id")), now=CLOCK[0])
+check("X trade 2 result = channel's +₹12,424", any("Trade result: +₹12,424 (3 lots)" in t for t in xsent), xsent)
+check("X day close = channel's +₹11,612", any("Day P&L: +₹11,612" in t for t in xsent), [t[:60] for t in xsent])
+
+# ── 4. the bot's buttons ──────────────────────────────────────────────────────
+print("bot buttons")
+tg, pub = reset("bot")
+at(27, 8, 0); pub.run_once(CLOCK[0])
+txt, kb = T.reply_for("hello", "333", "Meera", {"channel": CH})
+check("anyone who messages is welcomed and offered sizes", "Welcome, Meera" in txt and "Pick your size" in txt
+      and kb["inline_keyboard"][1][0]["callback_data"] == "plan:small", txt)
+check("…and starts on Standard with alerts on", T.load_subs()["333"]["plan"] == "standard" and T.load_subs()["333"]["alerts"])
+check("size button → Small", "Small · 1 lot" in T.on_callback("plan:small", "333") and T.load_subs()["333"]["plan"] == "small")
+txt, _ = T.reply_for("📍 Trade & SL", "333", "Meera", {})
+check("no open trade: says when trading happens", "No open trade" in txt and "10:00" in txt, txt)
+at(27, 10, 0); t = call_sell(4, prem=150.0); feed.trade_entry(t, 25900, strength="STRONG"); pub.run_once(CLOCK[0])
+txt, _ = T.reply_for("📍 Trade & SL", "333", "Meera", {})
+check("open trade at your size + stop", "Short <b>1 lot</b> 26000 CE" in txt and "Stop: exit if Nifty spot goes above 26,050" in txt, txt)
+
+
+class FakeKite:
+    def __init__(self):
+        self.orders = None
+
+    def basket_order_margins(self, orders, consider_positions=False, mode=None):
+        self.orders = orders
+        return {"final": {"total": 31234.5 * orders[0]["quantity"] / 65}}
+
+
+fk = FakeKite()
+T._kite = lambda: fk
+T._margin_cache.clear()
+txt, _ = T.reply_for("💰 Margin", "333", "Meera", {})
+check("margin: Zerodha's figure for your lots, hedge bought first", "₹31,234" in txt and "1 lot" in txt
+      and [o["transaction_type"] for o in fk.orders] == ["BUY", "SELL"] and fk.orders[1]["quantity"] == 65, txt)
+T.on_callback("plan:standard", "333"); T._margin_cache.clear()
+txt, _ = T.reply_for("💰 Margin", "333", "Meera", {})
+check("standard plan: 3 lots (strong)", "3 lots" in txt and "₹93,704" in txt and fk.orders[1]["quantity"] == 195, txt)
+T._kite = lambda: (_ for _ in ()).throw(RuntimeError("today's Zerodha login hasn't happened yet"))
+T._margin_cache.clear()
+txt, _ = T.reply_for("💰 Margin", "333", "Meera", {})
+check("margin unavailable: says so, no crash", "Couldn't get live margin" in txt, txt)
+txt, _ = T.reply_for("🧾 Charges", "333", "Meera", {})
+c = T.charges_for(F.new_position({"legs": [{"leg": "CE", "strike": 26000, "price": 150.0}], "entry_lots": 4,
+                                  "strength": "STRONG", "structure": "CALL_SELL",
+                                  "hedge": {"strike": 27050, "symbol": "H", "price": 5.0}}), 3)
+check("charges: 4 orders, ₹80 brokerage, STT on sells only", c["orders"] == 4 and c["brokerage"] == 80
+      and abs(c["stt"] - (150 + 5) * 195 * 0.001) < 1e-6, c)
+check("charges reply shows the total as an estimate", f"Total ≈ ₹{c['total']:,.0f}" in txt and "Estimate" in txt, txt)
+txt, _ = T.reply_for("🔔 Alerts", "333", "Meera", {})
+check("alerts toggle off", "off" in txt and T.load_subs()["333"]["alerts"] is False)
+at(27, 11, 0); feed.trade_exit(t, 100.0, 13000.0, "TARGET", 25800); pub.run_once(CLOCK[0])
+check("alerts off → no DM", not msgs(tg, "333")[-1:] or "TRADE CLOSED" not in (msgs(tg, "333") or [""])[-1])
+txt, _ = T.reply_for("📈 P&L", "333", "Meera", {})
+check("P&L at your size: 13000/(4×65) × 65 × 3 = +₹9,750", "Today: <b>+₹9,750</b>" in txt, txt)
+
+# ── 5. delivery rules ─────────────────────────────────────────────────────────
+print("delivery")
+tg, pub = reset("deliv")
+at(27, 8, 0); pub.run_once(CLOCK[0])
+subscribe("444", "small"); subscribe("555", "small")
+tg.fail_next = {CH: [429], "555": [403]}
+at(27, 10, 0); feed.trade_entry(call_sell(2), 25900, strength="MODERATE")
+pub.run_once(CLOCK[0])
+check("channel 429: event held, no DM sent yet", not msgs(tg, "444") and json.loads(T.STATE.read_text())["seq"] == 0)
+pub.run_once(CLOCK[0])
+check("retried: channel once, DM once", len(msgs(tg, CH)) == 1 and len(msgs(tg, "444")) == 1)
+check("user who blocked the bot (403) is switched off", T.load_subs()["555"].get("blocked") is True)
+check("safe_html escapes P&L but keeps tags and entities",
+      T.safe_html("<b>P&L</b> &amp; &lt;") == "<b>P&amp;L</b> &amp; &lt;")
+check("every message would parse: no bare '&'",
+      all("&" not in T.safe_html(m[2]).replace("&amp;", "").replace("&lt;", "").replace("&gt;", "") for m in tg.sent))
+
+tg, pub = reset("dry", live=False)
+at(27, 8, 0); pub.run_once(CLOCK[0]); subscribe("666", "small")
+at(27, 10, 0); feed.trade_entry(call_sell(2), 25900, strength="STRONG"); pub.run_once(CLOCK[0])
+check("dry run: nothing sent, channel + DM text in the log", tg.sent == []
+      and "Sell <b>3 lots</b>" in T.DRYRUN_LOG.read_text() and "Sell <b>1 lot</b>" in T.DRYRUN_LOG.read_text())
+
+tg, pub = reset("hol")
+CLOCK[0] = datetime(2026, 12, 25, 8, 0, tzinfo=IST); pub.run_once(CLOCK[0])
+CLOCK[0] = datetime(2026, 12, 25, 10, 0, tzinfo=IST); feed.trade_entry(call_sell(2), 25900); pub.run_once(CLOCK[0])
+check("NSE holiday: nothing posted", tg.sent == [])
+
+tg, pub = reset("first")
+at(27, 10, 0); feed.trade_entry(call_sell(2), 25900)
+pub.run_once(CLOCK[0])
+check("first start replays nothing", tg.sent == [] and json.loads(T.STATE.read_text())["seq"] == 1)
+
+print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
+sys.exit(1 if FAIL else 0)

@@ -20,3 +20,6 @@ pause_all.flag
 
 # X (Twitter) keys for the signal publisher
 x.env
+
+# Telegram settings for the channel / follower bot
+tg.env

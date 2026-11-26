@@ -1,0 +1,21 @@
+[Unit]
+Description=Telegram live — channel + follower DMs + Q&A bot for the Nifty signal feed (dry run unless TG_LIVE=1 in tg.env)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/trading-algo
+# Deliberately NOT the trading bot's .env: its Telegram token must never be polled by a second
+# process (409 Conflict). Settings live in tg.env (chmod 600), read by the service itself.
+ExecStart=/opt/trading-algo/venv/bin/python -m publish.telegram_live
+Restart=always
+RestartSec=30
+MemoryMax=150M
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=telegram-live
+
+[Install]
+WantedBy=multi-user.target
