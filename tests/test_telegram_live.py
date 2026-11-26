@@ -350,6 +350,37 @@ check("/revoke ends access", "access ended now" in txt and not A.has_access(T.lo
 txt, _ = T.reply_for("/extend 501 7", OWNER, "Rahul", ST, "", send)
 check("/extend gives days back", "+7 days" in txt and A.status(T.load_subs()["501"], CLOCK[0]) == "paid", txt)
 
+print("subscribe button")
+tg, pub = reset("subscribe")
+CLOCK[0] = datetime(2026, 12, 5, 11, 0, tzinfo=IST)
+side = []
+send = lambda cid, text, markup=None: side.append((cid, text, markup))
+ST = {"channel": CH, "owner_id": OWNER, "delay_min": 0}
+T.reply_for("/start", "801", "Kiran", ST, "kiran_r", send)
+check("keyboard has 💳 Subscribe, menu has /subscribe", ["💳 Subscribe"] in T.BUTTONS
+      and T.COMMANDS[1]["command"] == "subscribe" and T._keyboard()["keyboard"][3][0]["text"] == "💳 Subscribe")
+CLOCK[0] = datetime(2026, 12, 8, 11, 0, tzinfo=IST)                    # day 3 of the free month
+txt, kb = T.reply_for("💳 Subscribe", "801", "Kiran", ST, "kiran_r", send)
+check("on day 3 of the trial: thanks, free month kept until its end, owner pinged",
+      "free month continues until <b>4 Jan 2027</b>" in txt and "don't lose any free days" in txt
+      and side[-1][0] == OWNER and "Payment request" in side[-1][1] and "/paid 801 1" in side[-1][1]
+      and "Free access until" in side[-1][1], (txt, side[-1:]))
+check("…and the member keeps the normal keyboard", kb == T._keyboard())
+from publish import access as A_
+sub = T.load_subs()["801"]
+end = A_.add_paid(sub, CLOCK[0], 1, 999, "owner")
+check("paying early adds the month after the free month", end == datetime(2027, 2, 3, 11, 0, tzinfo=IST), end)
+subs_ = T.load_subs(); subs_["801"] = sub; T.save_subs(subs_)
+txt, _ = T.reply_for("/subscribe", "801", "Kiran", ST, "kiran_r", send)
+check("paid member: shows their end date, can extend", "subscribed until <b>3 Feb 2027</b>" in txt and side[-1][0] == OWNER)
+A_.revoke(sub, CLOCK[0]); subs_["801"] = sub; T.save_subs(subs_)
+txt, _ = T.reply_for("💳 Subscribe", "801", "Kiran", ST, "kiran_r", send)
+check("expired member: /subscribe still works (not blocked by the paywall)", "get your live trade alerts back on" in txt
+      and side[-1][0] == OWNER)
+T.reply_for("/start", OWNER, "Rahul", ST, "", send)
+txt, _ = T.reply_for("/subscribe", OWNER, "Rahul", ST, "", send)
+check("owner: no request to self", "You're the owner" in txt)
+
 print("channel runs 15 min late")
 tg, pub = reset("delay", delay=15)
 CLOCK[0] = datetime(2026, 12, 2, 8, 0, tzinfo=IST); pub.run_once(CLOCK[0])

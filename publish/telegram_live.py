@@ -64,11 +64,12 @@ CHARGES = {
     "gst": 0.18,                        # on brokerage + exchange + SEBI
 }
 
-BUTTONS = [["📍 Trade & SL", "💰 Margin"], ["🧾 Charges", "📈 P&L"], ["⚙️ Lot size", "🔔 Alerts"]]
-BUTTON_CMD = {"📍 Trade & SL": "/trade", "💰 Margin": "/margin", "🧾 Charges": "/charges",
+BUTTONS = [["📍 Trade & SL", "💰 Margin"], ["🧾 Charges", "📈 P&L"], ["⚙️ Lot size", "🔔 Alerts"], ["💳 Subscribe"]]
+BUTTON_CMD = {"💳 Subscribe": "/subscribe", "📍 Trade & SL": "/trade", "💰 Margin": "/margin", "🧾 Charges": "/charges",
               "📈 P&L": "/pnl", "⚙️ Lot size": "/size", "🔔 Alerts": "/alerts"}
 COMMANDS = [
     {"command": "start", "description": "Start: pick your lot size and get trade alerts"},
+    {"command": "subscribe", "description": "Subscribe or renew — we'll message you payment details"},
     {"command": "trade", "description": "Open trade at your size, with stop-loss"},
     {"command": "margin", "description": "Margin needed for the trade at your size"},
     {"command": "charges", "description": "Estimated charges for the trade at your size"},
@@ -895,6 +896,19 @@ def reply_for(text: str, chat_id: str, first_name: str, settings: dict, username
         return (welcome_text(first_name, channel) + "\n\n" + access_line(sub, now, is_owner), _size_buttons())
 
     A.ensure_trial(sub, now)
+    if cmd == "/subscribe":                                  # works at any time: trial, paid or expired
+        if is_owner:
+            return ("You're the owner — subscriptions are for members.", _keyboard())
+        status_now, end = A.status(sub, now), A.access_until(sub)
+        ack = on_callback("pay:request", chat_id, settings, send)       # tells the owner, with ready commands
+        if status_now == "trial":
+            head = (f"💳 <b>Thanks for subscribing!</b>\nYour free month continues until <b>{_date(end)}</b> — paying now "
+                    f"adds your paid months <b>after</b> that, so you don't lose any free days.")
+        elif status_now == "paid":
+            head = f"💳 You're subscribed until <b>{_date(end)}</b>. Paying again adds months after that."
+        else:
+            head = "💳 <b>Let's get your live trade alerts back on.</b>"
+        return (head + "\n\n" + ack, _keyboard())
     if not A.has_access(sub, now, is_owner):
         return (expired_text(sub, settings), pay_button())
 
