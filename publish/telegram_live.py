@@ -129,6 +129,14 @@ def safe_html(text: str) -> str:
     return re.sub(r"&(?!(?:amp|lt|gt|quot|#\d+);)", "&amp;", text)
 
 
+def bot_button(username: str) -> Optional[dict]:
+    """The button under every channel post: opens the bot (deep link, so we can tell where people came from)."""
+    if not username:
+        return None
+    return {"inline_keyboard": [[{"text": "💬 Ask the bot · 1-lot alerts · margin",
+                                  "url": f"https://t.me/{username}?start=channel"}]]}
+
+
 def _retryable(resp: dict) -> bool:
     code = resp.get("error_code")
     return code is None or code == 429 or (isinstance(code, int) and code >= 500)
@@ -210,7 +218,7 @@ def _actions(pos: dict, deltas: dict, prices: dict) -> list:
     return lines
 
 
-def entry_msg(ev: dict, pos: dict, plan_name: str, bot_username: str = "", channel: bool = False) -> str:
+def entry_msg(ev: dict, pos: dict, plan_name: str) -> str:
     n = _plan_lots(plan_name, pos)
     grade = {"STRONG": ", strong signal", "MODERATE": ", moderate signal"}.get(pos.get("grade") or "", "")
     name = "Nifty strangle" if pos["structure"] == "STRANGLE" else "Nifty"
@@ -223,8 +231,6 @@ def entry_msg(ev: dict, pos: dict, plan_name: str, bot_username: str = "", chann
     lines.append(f"Expiry {ev.get('expiry')} · Spot {X._num(ev.get('spot'))}")
     lines.append(_stop_line(pos))
     lines.append(f"⏰ {X._ts(ev):%H:%M} IST")
-    if channel and bot_username:
-        lines.append(f"\n1-lot version and margin: @{bot_username}")
     return "\n".join(lines)
 
 
@@ -339,7 +345,7 @@ class Publisher:
         self.tg = tg
         self.settings = settings
 
-    def _out(self, chat_id, text: str, tag: str, required: bool) -> None:
+    def _out(self, chat_id, text: str, tag: str, required: bool, markup: Optional[dict] = None) -> None:
         """Send one message. `required` (the channel) raises _Retry on a temporary failure so the
         whole event is retried before any DM goes out; DMs are best effort (never duplicated)."""
         if not self.settings.get("live") or self.tg is None:
@@ -347,7 +353,7 @@ class Publisher:
             with open(DRYRUN_LOG, "a") as f:
                 f.write(f"--- {tag} → {chat_id}\n{text}\n\n")
             return
-        resp = self.tg.send(chat_id, text)
+        resp = self.tg.send(chat_id, text, **({"reply_markup": markup} if markup else {}))
         if resp.get("ok"):
             return
         logger.warning(f"{tag} → {chat_id}: {resp.get('error_code')} {resp.get('description')}")
@@ -362,7 +368,8 @@ class Publisher:
 
     def _channel(self, text: str, tag: str) -> None:
         if self.settings.get("channel"):
-            self._out(self.settings["channel"], text, tag, required=True)
+            self._out(self.settings["channel"], text, tag, required=True,
+                      markup=bot_button(self.tg.username if self.tg else ""))
 
     def _dms(self, build, tag: str) -> None:
         for chat_id, sub in load_subs().items():
@@ -386,7 +393,7 @@ class Publisher:
             positions[pid or "?"] = pos
             st["last_entry"] = pos
             if today:
-                self._channel(entry_msg(ev, pos, "standard", (self.tg.username if self.tg else ""), channel=True), tag)
+                self._channel(entry_msg(ev, pos, "standard"), tag)
                 self._dms(lambda plan: entry_msg(ev, pos, plan), tag)
             return
 

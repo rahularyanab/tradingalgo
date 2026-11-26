@@ -107,7 +107,13 @@ feed.trade_entry(t1, 25917, strength="MODERATE"); pub.run_once(CLOCK[0])
 ch = msgs(tg, CH)[-1]
 check("channel entry: moderate → 2 lots (owner filled 2 of 4)", "Sell <b>2 lots</b> 26000 CE @ ₹167.80" in ch
       and "Hedge: buy <b>2 lots</b> 27100 CE" in ch and "above 26,020" in ch, ch)
-check("channel entry points to the bot for 1-lot + margin", "@ThetaDeskBot" in ch)
+btn = [m[3] for m in tg.sent if m[1] == CH][-1]
+check("every channel post carries the bot button (deep link)", all(
+      m[3] and m[3]["inline_keyboard"][0][0]["url"] == "https://t.me/ThetaDeskBot?start=channel"
+      for m in tg.sent if m[1] == CH), btn)
+check("DMs don't carry it", all(m[3] is None for m in tg.sent if m[1] != CH))
+txt, _ = T.reply_for("/start channel", "777", "Kiran", {"channel": CH})
+check("deep link '/start channel' gets the welcome", "Welcome, Kiran" in txt)
 check("small DM: 1 lot", "Sell <b>1 lot</b> 26000 CE" in msgs(tg, "111")[-1], msgs(tg, "111")[-1])
 check("standard DM: 2 lots", "Sell <b>2 lots</b> 26000 CE" in msgs(tg, "222")[-1])
 
