@@ -710,6 +710,7 @@ OWNER_HELP = ("👑 <b>Owner commands</b>\n"
               "/extend &lt;who&gt; &lt;days&gt; — add free days\n"
               "/revoke &lt;who&gt; — end access now\n"
               "/msg &lt;who&gt; &lt;text&gt; — message someone through the bot\n"
+              "/key &lt;who&gt; — auto-trading key for a paid member (new key each time; 'off' removes it)\n"
               "&lt;who&gt; = chat id, @username or the start of their name")
 
 
@@ -722,6 +723,7 @@ def owner_command(cmd: str, args: list, subs: dict, now: datetime, settings: dic
             return "No one has started the bot yet."
         rows = []
         owner = str(settings.get("owner_id") or "")
+        seen = _load(_paths.LOGS_DIR / "exec_seen.json", {})
         for cid, sub in sorted(subs.items(), key=lambda kv: A.access_until(kv[1]) or now):
             A.ensure_trial(sub, now)
             st = A.status(sub, now, cid == owner)
@@ -732,14 +734,16 @@ def owner_command(cmd: str, args: list, subs: dict, now: datetime, settings: dic
                         + f" · {sub.get('plan', 'standard')} · <b>{st}</b>"
                         + (f" → {_date(end)}" if end and st != "owner" else "")
                         + (f" · paid ₹{paid:,.0f}" if paid else "")
-                        + (" · blocked bot" if sub.get("blocked") else ""))
+                        + (" · blocked bot" if sub.get("blocked") else "")
+                        + (f" · 🤖 exec (seen {seen[cid]['at'][5:16].replace('T', ' ')})" if sub.get("exec_key_sha256") and cid in seen
+                           else (" · 🤖 exec (never connected)" if sub.get("exec_key_sha256") else "")))
         counts = {}
         for cid, sub in subs.items():
             k = A.status(sub, now, cid == owner)
             counts[k] = counts.get(k, 0) + 1
         return (f"👥 <b>{len(subs)} members</b> · " + " · ".join(f"{k} {v}" for k, v in sorted(counts.items()))
                 + "\n\n" + "\n".join(rows[:60]) + ("\n…" if len(rows) > 60 else ""))
-    if cmd not in ("/paid", "/extend", "/revoke", "/msg"):
+    if cmd not in ("/paid", "/extend", "/revoke", "/msg", "/key"):
         return None
     if not args:
         return OWNER_HELP
@@ -777,6 +781,25 @@ def owner_command(cmd: str, args: list, subs: dict, now: datetime, settings: dic
         A.revoke(sub, now)
         save_subs(subs)
         return f"⛔ {name}: access ended now. (They were not messaged.)"
+    if cmd == "/key":
+        from publish import executor_api as EA
+        if len(args) > 1 and args[1].lower() == "off":
+            for k in ("exec_key_sha256", "exec_key_created", "exec_since"):
+                sub.pop(k, None)
+            save_subs(subs)
+            return (f"🔑 {name}: auto-trading key removed — their executor is locked out now, including exits. "
+                    f"If they might have a position open, use /revoke instead: it stops new trades but still "
+                    f"sends the exits.")
+        owner = str(settings.get("owner_id") or "")
+        if cid != owner and A.status(sub, now) != "paid":
+            return f"{name} isn't on paid access — record the payment with /paid first. Auto-trading is for paid members only."
+        key, digest = EA.new_key()
+        sub["exec_key_sha256"] = digest
+        sub["exec_key_created"] = sub["exec_since"] = now.isoformat(timespec="seconds")
+        save_subs(subs)
+        return (f"🔑 Auto-trading key for {name} ({PLAN_LABEL[sub.get('plan', 'standard')]}):\n<code>{key}</code>\n\n"
+                f"Shown only once — it goes into their executor's setup. Any older key for them stops working now. "
+                f"Delete this message after copying it.")
     if cmd == "/msg":
         text = " ".join(args[1:]).strip()
         if not text:

@@ -23,3 +23,6 @@ x.env
 
 # Telegram settings for the channel / follower bot
 tg.env
+
+# Executor API TLS key + certificate (server only)
+exec_tls/

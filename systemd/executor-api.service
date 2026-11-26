@@ -1,0 +1,20 @@
+[Unit]
+Description=Executor API — paid subscribers' executors fetch their orders here (HTTPS :8443, key auth)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/trading-algo
+# No EnvironmentFile: it needs no secrets. It reads subscriber key HASHES and the owner id only.
+ExecStart=/opt/trading-algo/venv/bin/python -m publish.executor_api
+Restart=always
+RestartSec=10
+MemoryMax=100M
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=executor-api
+
+[Install]
+WantedBy=multi-user.target
