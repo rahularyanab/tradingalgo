@@ -148,6 +148,7 @@ check("owner's real ₹ amounts never posted", not any(x in s for s in texts() f
 check("owner's real lot counts never posted", not any(x in s for s in texts() for x in ("6 lots", "12 lots", "4 lots")))
 check("no links", not any("http" in s or "www." in s for s in texts()))
 check("every post fits in 280", all(xp._weight(s) <= 280 for s in texts()), [xp._weight(s) for s in texts()])
+check("every post carries hashtags (exits too)", all("#Nifty" in s for s in texts()), [s[:40] for s in texts() if "#Nifty" not in s])
 if VERBOSE:
     print("\n" + "\n\n".join(f"[{a}]\n{b}" for a, b in SENT) + "\n")
 

@@ -237,7 +237,7 @@ def exit_text(ev: dict, result_rs: Optional[int], lots: int, late: bool) -> str:
              _reason(ev["reason"]) + (f" · {_pts(ev['points'])}" if ev.get("points") is not None else "")]
     if result_rs is not None:
         lines.append(f"Trade result: {_rs(result_rs)} ({_lots_word(lots)}{' each leg' if ev.get('structure') == 'STRANGLE' else ''})")
-    lines.append(_when(ev))
+    lines += [_when(ev), HASHTAGS]
     return _fit("\n".join(lines))
 
 
