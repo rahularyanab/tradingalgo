@@ -1,0 +1,9 @@
+[Unit]
+Description=Post the end-of-day report card after the close (only on days with a trade)
+
+[Timer]
+OnCalendar=Mon..Fri 15:47 Asia/Kolkata
+Persistent=false
+
+[Install]
+WantedBy=timers.target

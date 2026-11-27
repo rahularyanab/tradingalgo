@@ -1,0 +1,9 @@
+[Unit]
+Description=End-of-day report card on X and the Telegram channel (Standard plan, after the close)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/trading-algo
+ExecStart=/opt/trading-algo/venv/bin/python -m publish.day_card post
